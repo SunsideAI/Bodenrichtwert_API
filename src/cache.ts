@@ -83,6 +83,13 @@ export const cache = {
     if (removed > 0) scheduleSave();
     return removed;
   },
+
+  clear(): number {
+    const count = Object.keys(store).length;
+    store = {};
+    scheduleSave();
+    return count;
+  },
 };
 
 cache.cleanup();
