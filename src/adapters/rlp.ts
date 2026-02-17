@@ -51,23 +51,37 @@ export class RheinlandPfalzAdapter implements BodenrichtwertAdapter {
         return null;
       }
 
-      // Wohnbau-BRW bevorzugen (Nutzungsart beginnt mit "W"), sonst erster Treffer
+      // Wohnbau-BRW bevorzugen (VBORIS: "art" Feld, z.B. "W" oder "WR")
       const wohn = json.features.find(
         (f: any) => {
-          const nutzung = f.properties?.nutzungsart || '';
-          return nutzung.startsWith('W') || nutzung.toLowerCase().includes('wohn');
+          const p = f.properties || {};
+          const nutzung = p.art || p.nutzungsart || p.ART || '';
+          return String(nutzung).startsWith('W') || String(nutzung).toLowerCase().includes('wohn');
         }
       ) || json.features[0];
 
       const p = wohn.properties;
 
+      // DEBUG: Alle Properties loggen, um exakte Feldnamen zu ermitteln
+      console.log('RLP Properties Keys:', Object.keys(p).join(', '));
+      console.log('RLP Properties:', JSON.stringify(p, null, 2));
+
+      // VBORIS-Feldnamen: wert, art, stichtag, entwicklungszustand, zonennummer
+      // Fallback auf alternative Namen falls abweichend
+      const brwValue = p.wert ?? p.bodenrichtwert ?? p.brw ?? p.BRW ?? p.richtwert ?? 0;
+      const stichtag = p.stichtag ?? p.STICHTAG ?? p.datum ?? 'unbekannt';
+      const nutzung = p.art ?? p.nutzungsart ?? p.ART ?? p.nutzung ?? 'unbekannt';
+      const entw = p.entwicklungszustand ?? p.entw ?? p.ENTW ?? 'B';
+      const zone = p.zonennummer ?? p.zone ?? p.ZONE ?? '';
+      const gemeinde = p.gemeinde ?? p.ort ?? p.ortsteilName ?? '';
+
       return {
-        wert: p.bodenrichtwert || 0,
-        stichtag: p.stichtag || 'unbekannt',
-        nutzungsart: p.nutzungsart || 'unbekannt',
-        entwicklungszustand: p.entwicklungszustand || 'B',
-        zone: p.zonennummer || p.zone || '',
-        gemeinde: p.gemeinde || p.ort || '',
+        wert: typeof brwValue === 'number' ? brwValue : parseFloat(brwValue) || 0,
+        stichtag: String(stichtag),
+        nutzungsart: String(nutzung),
+        entwicklungszustand: String(entw),
+        zone: String(zone),
+        gemeinde: String(gemeinde),
         bundesland: 'Rheinland-Pfalz',
         quelle: 'BORIS-RLP Basisdienst',
         lizenz: '© LVermGeo RLP, dl-de/by-2-0',
