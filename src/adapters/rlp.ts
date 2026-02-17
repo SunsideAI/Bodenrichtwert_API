@@ -60,6 +60,10 @@ export class RheinlandPfalzAdapter implements BodenrichtwertAdapter {
       Y: '50',
       INFO_FORMAT: 'text/xml',
       FEATURE_COUNT: '5',
+      STYLES: '',
+      FORMAT: 'image/png',
+      TRANSPARENT: 'TRUE',
+      EXCEPTIONS: 'application/vnd.ogc.se_xml',
     });
 
     const url = `${this.wmsUrl}?${params}`;
@@ -121,6 +125,10 @@ export class RheinlandPfalzAdapter implements BodenrichtwertAdapter {
       Y: '50',
       INFO_FORMAT: 'text/html',
       FEATURE_COUNT: '5',
+      STYLES: '',
+      FORMAT: 'image/png',
+      TRANSPARENT: 'TRUE',
+      EXCEPTIONS: 'application/vnd.ogc.se_xml',
     });
 
     const url = `${this.wmsUrl}?${params}`;
