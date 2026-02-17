@@ -115,8 +115,10 @@ app.post('/api/enrich', async (c) => {
       });
     }
 
-    // 5. Cachen
-    cache.set(cacheKey, brw);
+    // 5. Nur cachen wenn wert > 0 (verhindert gecachte Fehlresultate)
+    if (brw.wert > 0) {
+      cache.set(cacheKey, brw);
+    }
 
     // 6. Response
     return c.json({
@@ -139,6 +141,14 @@ app.post('/api/enrich', async (c) => {
       detail: process.env.NODE_ENV !== 'production' ? String(err) : undefined,
     }, 500);
   }
+});
+
+// ==========================================
+// DELETE /api/cache — Cache leeren
+// ==========================================
+app.delete('/api/cache', (c) => {
+  const removed = cache.clear();
+  return c.json({ status: 'ok', removed });
 });
 
 // ==========================================
