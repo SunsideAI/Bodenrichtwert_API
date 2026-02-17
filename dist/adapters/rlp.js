@@ -50,6 +50,10 @@ export class RheinlandPfalzAdapter {
             Y: '50',
             INFO_FORMAT: 'text/xml',
             FEATURE_COUNT: '5',
+            STYLES: '',
+            FORMAT: 'image/png',
+            TRANSPARENT: 'TRUE',
+            EXCEPTIONS: 'application/vnd.ogc.se_xml',
         });
         const url = `${this.wmsUrl}?${params}`;
         console.log(`RLP WMS GetFeatureInfo: ${layer} → ${url}`);
@@ -99,6 +103,10 @@ export class RheinlandPfalzAdapter {
             Y: '50',
             INFO_FORMAT: 'text/html',
             FEATURE_COUNT: '5',
+            STYLES: '',
+            FORMAT: 'image/png',
+            TRANSPARENT: 'TRUE',
+            EXCEPTIONS: 'application/vnd.ogc.se_xml',
         });
         const url = `${this.wmsUrl}?${params}`;
         const res = await fetch(url, {
