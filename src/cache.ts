@@ -92,5 +92,19 @@ export const cache = {
   },
 };
 
+// Startup: abgelaufene UND fehlerhafte Einträge (wert=0) entfernen
 cache.cleanup();
+{
+  let purged = 0;
+  for (const key of Object.keys(store)) {
+    if (!store[key].data.wert || store[key].data.wert === 0) {
+      delete store[key];
+      purged++;
+    }
+  }
+  if (purged > 0) {
+    console.log(`Cache: ${purged} fehlerhafte Einträge (wert=0) entfernt`);
+    scheduleSave();
+  }
+}
 console.log(`Cache loaded: ${Object.keys(store).length} entries`);
