@@ -4,8 +4,9 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  * Rheinland-Pfalz Adapter
  *
  * Nutzt den OGC API Features Endpunkt des Geoportals RLP (ldproxy).
- * Collections sind jahrgangsbasiert: BORIS_2024, BORIS_2022, etc.
- * Unterstützt bbox-Filter direkt in WGS84 (EPSG:4326).
+ * Collections sind jahrgangsbasiert (z.B. BORIS 2024).
+ * Beim ersten Aufruf wird die Collection-Liste dynamisch geladen,
+ * um den exakten Collection-ID-String zu ermitteln.
  *
  * Endpunkt-Doku: https://geoportal.rlp.de/spatial-objects/548
  */
@@ -14,19 +15,67 @@ export class RheinlandPfalzAdapter implements BodenrichtwertAdapter {
   stateCode = 'RP';
   isFallback = false;
 
-  private serviceUrl = 'https://www.geoportal.rlp.de/spatial-objects/548/collections';
+  private serviceUrl = 'https://www.geoportal.rlp.de/spatial-objects/548';
 
-  // Aktuellste Collections zuerst – Fallback auf ältere Jahrgänge
-  private collections = ['BORIS_2024', 'BORIS_2022', 'BORIS_2020'];
+  /** Gecachte, sortierte Collection-IDs (neueste zuerst) */
+  private resolvedCollections: string[] | null = null;
+
+  /**
+   * Collection-IDs dynamisch vom API-Endpoint laden.
+   * Cached das Ergebnis für folgende Aufrufe.
+   */
+  private async getCollections(): Promise<string[]> {
+    if (this.resolvedCollections) return this.resolvedCollections;
+
+    try {
+      const res = await fetch(`${this.serviceUrl}/collections?f=json`, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      });
+
+      if (res.ok) {
+        const json = await res.json() as any;
+        const cols: string[] = (json.collections || [])
+          .map((c: any) => c.id as string)
+          .filter((id: string) => /boris/i.test(id))
+          .sort((a: string, b: string) => {
+            const yearA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+            const yearB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+            return yearB - yearA; // neueste zuerst
+          });
+
+        if (cols.length > 0) {
+          console.log(`RLP: ${cols.length} BORIS-Collections gefunden: ${cols.join(', ')}`);
+          this.resolvedCollections = cols;
+          return cols;
+        }
+      }
+    } catch (err) {
+      console.warn('RLP: Collections-Endpoint nicht erreichbar, verwende Fallback-IDs:', err);
+    }
+
+    // Fallback: Alle plausiblen ID-Formate für 2024/2022 durchprobieren
+    const fallback = [
+      'BORIS 2024', 'BORIS_2024', 'BORIS2024', 'boris_2024', 'boris2024',
+      'BORIS 2022', 'BORIS_2022', 'BORIS2022', 'boris_2022', 'boris2022',
+    ];
+    this.resolvedCollections = fallback;
+    return fallback;
+  }
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    // bbox-Filter: kleines Rechteck um den Punkt (~50m)
-    const delta = 0.0005;
+    const collections = await this.getCollections();
+
+    // bbox-Filter: kleines Rechteck um den Punkt (~100m)
+    const delta = 0.001;
     const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
-    for (const collection of this.collections) {
+    for (const collection of collections) {
       try {
-        const url = `${this.serviceUrl}/${collection}/items?bbox=${bbox}&f=json&limit=5`;
+        const encoded = encodeURIComponent(collection);
+        const url = `${this.serviceUrl}/collections/${encoded}/items?bbox=${bbox}&f=json&limit=5`;
+
+        console.log(`RLP: Frage ${collection} ab → ${url}`);
 
         const res = await fetch(url, {
           headers: {
@@ -37,11 +86,12 @@ export class RheinlandPfalzAdapter implements BodenrichtwertAdapter {
         });
 
         if (!res.ok) {
-          console.warn(`RLP ${collection}: HTTP ${res.status} – versuche nächsten Jahrgang`);
+          console.warn(`RLP ${collection}: HTTP ${res.status}`);
           continue;
         }
 
         const json = await res.json() as any;
+        console.log(`RLP ${collection}: ${json.features?.length || 0} Features gefunden`);
 
         if (!json.features?.length) {
           continue;
@@ -65,7 +115,7 @@ export class RheinlandPfalzAdapter implements BodenrichtwertAdapter {
           zone: p.zone || p.lage || p.brw_zone || '',
           gemeinde: p.gemeinde || p.ort || '',
           bundesland: 'Rheinland-Pfalz',
-          quelle: `BORIS-RLP (${collection.replace('_', ' ')})`,
+          quelle: `BORIS-RLP (${collection})`,
           lizenz: '© LVermGeo RLP',
         };
       } catch (err) {
@@ -80,8 +130,8 @@ export class RheinlandPfalzAdapter implements BodenrichtwertAdapter {
 
   async healthCheck(): Promise<boolean> {
     try {
-      const url = `${this.serviceUrl}/${this.collections[0]}/items?limit=1&f=json`;
-      const res = await fetch(url, {
+      const res = await fetch(`${this.serviceUrl}/collections?f=json`, {
+        headers: { 'Accept': 'application/json' },
         signal: AbortSignal.timeout(5000),
       });
       return res.ok;
