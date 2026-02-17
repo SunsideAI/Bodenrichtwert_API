@@ -1,5 +1,4 @@
 node_modules/
-dist/
 data/cache.sqlite
 data/cache.sqlite-wal
 data/cache.sqlite-shm
