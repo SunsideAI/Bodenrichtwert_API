@@ -28,6 +28,22 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
     'https://geoserver.geodaten-mv.de/geoserver/bodenrichtwerte/wms',
   ];
 
+  // Cached discovered WMS layer names
+  private discoveredWmsLayers: string[] | null = null;
+
+  // VBORIS-style date-keyed layer candidates for MV
+  private readonly wmsLayerCandidates = [
+    'vBODENRICHTWERTZONE_20240101',
+    'vBODENRICHTWERTZONE_20230101',
+    'vBODENRICHTWERTZONE_20220101',
+    'bodenrichtwert',
+    'Bodenrichtwert',
+    'bodenrichtwerte',
+    'BRW',
+    'brw',
+    '0',
+  ];
+
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
     // Try WFS endpoints first
     for (const wfsUrl of this.wfsUrls) {
@@ -39,17 +55,71 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
       }
     }
 
-    // Fall back to WMS GetFeatureInfo
+    // Discover WMS layer names via GetCapabilities if not yet done
+    if (!this.discoveredWmsLayers) {
+      await this.discoverWmsLayers();
+    }
+
+    // Fall back to WMS GetFeatureInfo using discovered + candidate layers
+    const layersToTry = this.discoveredWmsLayers?.length
+      ? [...this.discoveredWmsLayers, ...this.wmsLayerCandidates]
+      : this.wmsLayerCandidates;
+
     for (const wmsUrl of this.wmsUrls) {
-      try {
-        const result = await this.tryWmsQuery(wmsUrl, lat, lon);
-        if (result) return result;
-      } catch {
-        // Try next
+      for (const layer of layersToTry) {
+        try {
+          const result = await this.tryWmsQuery(wmsUrl, lat, lon, layer);
+          if (result) return result;
+        } catch {
+          // Try next
+        }
       }
     }
 
     return null;
+  }
+
+  private async discoverWmsLayers(): Promise<void> {
+    for (const wmsUrl of this.wmsUrls) {
+      try {
+        const params = new URLSearchParams({
+          SERVICE: 'WMS',
+          VERSION: '1.1.1',
+          REQUEST: 'GetCapabilities',
+        });
+        const res = await fetch(`${wmsUrl}?${params}`, {
+          headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!res.ok) continue;
+
+        const xml = await res.text();
+        if (!xml.includes('<WMT_MS_Capabilities') && !xml.includes('<WMS_Capabilities')) continue;
+
+        const layers = [...xml.matchAll(/<Name>([^<]+)<\/Name>/gi)]
+          .map(m => m[1].trim())
+          .filter(n => n.length > 0 && n.length < 120 && !n.includes('http'));
+
+        const brwLayers = layers.filter(n =>
+          n.toLowerCase().includes('brw') ||
+          n.toLowerCase().includes('bodenrichtwert') ||
+          n.toLowerCase().includes('vboris')
+        );
+
+        if (brwLayers.length > 0) {
+          console.log(`MV WMS: Discovered layers: ${brwLayers.join(', ')}`);
+          this.discoveredWmsLayers = brwLayers;
+          return;
+        }
+        if (layers.length > 0) {
+          this.discoveredWmsLayers = layers;
+          return;
+        }
+      } catch {
+        // Try next URL
+      }
+    }
+    this.discoveredWmsLayers = [];
   }
 
   private async tryWfsQuery(wfsUrl: string, lat: number, lon: number): Promise<NormalizedBRW | null> {
@@ -110,14 +180,12 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
     };
   }
 
-  private async tryWmsQuery(wmsUrl: string, lat: number, lon: number): Promise<NormalizedBRW | null> {
+  private async tryWmsQuery(wmsUrl: string, lat: number, lon: number, layer: string): Promise<NormalizedBRW | null> {
     const delta = 0.001;
     const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
-    // Try common MV BRW layer names
-    const layers = ['bodenrichtwert', 'Bodenrichtwert', 'BRW', 'brw', 'bodenrichtwerte', '0'];
-
-    for (const layer of layers) {
+    // Try text/plain first (avoids HTML-wrapped responses), then text/xml
+    for (const infoFormat of ['text/plain', 'text/xml']) {
       try {
         const params = new URLSearchParams({
           SERVICE: 'WMS',
@@ -131,7 +199,7 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
           HEIGHT: '101',
           X: '50',
           Y: '50',
-          INFO_FORMAT: 'text/xml',
+          INFO_FORMAT: infoFormat,
           FEATURE_COUNT: '5',
           STYLES: '',
           FORMAT: 'image/png',
@@ -147,34 +215,41 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
 
         const text = await res.text();
         if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
-        if (text.trim().length < 50) continue;
+        if (text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html')) continue;
+        if (text.trim().length < 30) continue;
 
         const wert = this.extractValue(text);
         if (!wert || wert <= 0) continue;
 
         return {
           wert,
-          stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || 'unbekannt',
-          nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || 'unbekannt',
-          entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || 'B',
-          zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || '',
-          gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || '',
+          stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || this.extractField(text, 'STAG') || 'unbekannt',
+          nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || this.extractField(text, 'NUTA') || 'unbekannt',
+          entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || this.extractField(text, 'ENTW') || 'B',
+          zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || this.extractField(text, 'WNUM') || '',
+          gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || this.extractField(text, 'GENA') || '',
           bundesland: 'Mecklenburg-Vorpommern',
           quelle: 'BORIS-MV (WMS)',
           lizenz: '© LAiV M-V',
         };
       } catch {
-        // Try next layer
+        // Try next format
       }
     }
     return null;
   }
 
   private extractValue(text: string): number | null {
-    const patterns = [
-      /<(?:[a-zA-Z]+:)?BRW>(\d+(?:[.,]\d+)?)</i,
-      /<(?:[a-zA-Z]+:)?bodenrichtwert>(\d+(?:[.,]\d+)?)</i,
+    const patterns: RegExp[] = [
+      // text/plain key=value format
+      /^\s*BRW\s*=\s*'?([\d.,]+)'?/im,
+      /^\s*BODENRICHTWERT(?:_TEXT|_LABEL)?\s*=\s*'?([\d.,]+)'?/im,
+      // XML elements (allow attributes in opening tag)
+      /<(?:[a-zA-Z]+:)?BRW(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
+      /<(?:[a-zA-Z]+:)?bodenrichtwert(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
+      // XML attribute
       /\bBRW="(\d+(?:[.,]\d+)?)"/i,
+      // EUR/m² unit marker
       /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m|€\/m)/i,
     ];
     for (const pattern of patterns) {
@@ -192,11 +267,18 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
   }
 
   private extractField(text: string, field: string): string | null {
+    // text/plain key=value: FIELD = 'VALUE'
+    const plainRe = new RegExp(`^\\s*${field}\\s*=\\s*'?([^'\\n]*)'?`, 'im');
+    const plainMatch = text.match(plainRe);
+    if (plainMatch) return plainMatch[1].trim();
+
+    // XML attribute
     const attrRe = new RegExp(`\\b${field}="([^"]*)"`, 'i');
     const attrMatch = text.match(attrRe);
     if (attrMatch) return attrMatch[1].trim();
 
-    const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([^<]+)<`, 'i');
+    // XML element
+    const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
     const match = text.match(re);
     return match ? match[1].trim() : null;
   }

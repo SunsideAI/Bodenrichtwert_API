@@ -15,10 +15,13 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   isFallback = false;
 
   // Multiple URL candidates for SH BRW WMS
+  // Note: service.gdi-sh.de backend was down; dienste.gdi-sh.de is the active alternative
   private readonly wmsUrls = [
+    'https://dienste.gdi-sh.de/WMS_SH_FD_VBORIS',
     'https://service.gdi-sh.de/WMS_SH_FD_VBORIS',
     'https://service.gdi-sh.de/WMS_SH_BORIS',
     'https://gdi.schleswig-holstein.de/WMS_SH_FD_VBORIS',
+    'https://sh-mis.schleswig-holstein.de/geoserver/vboris/wms',
   ];
 
   private discoveredLayers: string[] | null = null;
@@ -26,7 +29,10 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
 
   // Static layer candidates – tried when GetCapabilities fails
   private readonly layerCandidates = [
-    // Year-based (most likely for VBORIS SH)
+    // VBORIS date-keyed layer names (SH uses date suffix YYYYMMDD)
+    'vBODENRICHTWERTZONE_20240101', 'vBODENRICHTWERTZONE_20230101', 'vBODENRICHTWERTZONE_20220101',
+    'VBODENRICHTWERTZZONE_20240101',
+    // Year-based
     'Stichtag_2024', 'Stichtag_2023', 'Stichtag_2022',
     // Generic VBORIS names
     'brw_aktuell', 'BRW_aktuell', 'brw_zonal', 'BRW_Zonal',
@@ -121,57 +127,76 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
     const delta = 0.001;
     const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
-    const params = new URLSearchParams({
-      SERVICE: 'WMS',
-      VERSION: '1.1.1',
-      REQUEST: 'GetFeatureInfo',
-      LAYERS: layer,
-      QUERY_LAYERS: layer,
-      SRS: 'EPSG:4326',
-      BBOX: bbox,
-      WIDTH: '101',
-      HEIGHT: '101',
-      X: '50',
-      Y: '50',
-      INFO_FORMAT: 'text/xml',
-      FEATURE_COUNT: '5',
-      STYLES: '',
-      FORMAT: 'image/png',
-    });
+    // Try text/plain first (like Sachsen), then text/xml
+    for (const infoFormat of ['text/plain', 'text/xml', 'application/json']) {
+      try {
+        const params = new URLSearchParams({
+          SERVICE: 'WMS',
+          VERSION: '1.1.1',
+          REQUEST: 'GetFeatureInfo',
+          LAYERS: layer,
+          QUERY_LAYERS: layer,
+          SRS: 'EPSG:4326',
+          BBOX: bbox,
+          WIDTH: '101',
+          HEIGHT: '101',
+          X: '50',
+          Y: '50',
+          INFO_FORMAT: infoFormat,
+          FEATURE_COUNT: '5',
+          STYLES: '',
+          FORMAT: 'image/png',
+        });
 
-    const url = `${wmsUrl}?${params}`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-      signal: AbortSignal.timeout(10000),
-    });
+        const url = `${wmsUrl}?${params}`;
+        const res = await fetch(url, {
+          headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+          signal: AbortSignal.timeout(10000),
+        });
 
-    if (!res.ok) return null;
+        if (!res.ok) continue;
 
-    const text = await res.text();
-    if (text.includes('ServiceException') || text.includes('ExceptionReport')) return null;
-    if (text.trim().length < 50) return null;
+        const text = await res.text();
+        if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
+        if (text.trim().length < 30) continue;
 
-    const wert = this.extractValue(text);
-    if (!wert || wert <= 0) return null;
+        // Skip if it returned HTML instead of data
+        if (text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html')) continue;
 
-    return {
-      wert,
-      stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || 'aktuell',
-      nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || 'W',
-      entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || 'B',
-      zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || '',
-      gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || '',
-      bundesland: 'Schleswig-Holstein',
-      quelle: 'VBORIS-SH',
-      lizenz: '© LVermGeo SH (Ansicht frei)',
-    };
+        const wert = this.extractValue(text);
+        if (!wert || wert <= 0) continue;
+
+        return {
+          wert,
+          stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || this.extractField(text, 'STAG') || 'aktuell',
+          nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || this.extractField(text, 'NUTA') || 'W',
+          entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || this.extractField(text, 'ENTW') || 'B',
+          zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || this.extractField(text, 'WNUM') || '',
+          gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || this.extractField(text, 'GENA') || '',
+          bundesland: 'Schleswig-Holstein',
+          quelle: 'VBORIS-SH',
+          lizenz: '© LVermGeo SH (Ansicht frei)',
+        };
+      } catch {
+        // Try next format
+      }
+    }
+    return null;
   }
 
   private extractValue(text: string): number | null {
     const patterns = [
-      /<(?:[a-zA-Z]+:)?BRW>(\d+(?:[.,]\d+)?)</i,
-      /<(?:[a-zA-Z]+:)?bodenrichtwert>(\d+(?:[.,]\d+)?)</i,
+      // text/plain key=value: BRW = '450' or BRW = 450
+      /^\s*BRW\s*=\s*'?([\d.,]+)'?/im,
+      /^\s*BODENRICHTWERT(?:_TEXT|_LABEL)?\s*=\s*'?([\d.,]+)'?/im,
+      // XML element
+      /<(?:[a-zA-Z]+:)?BRW(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
+      /<(?:[a-zA-Z]+:)?bodenrichtwert(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
+      // XML attribute
       /\bBRW="(\d+(?:[.,]\d+)?)"/i,
+      // JSON field
+      /"(?:BRW|brw|bodenrichtwert)"\s*:\s*([\d.]+)/i,
+      // EUR/m²
       /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m|€\/m)/i,
     ];
     for (const pattern of patterns) {
@@ -189,12 +214,18 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   }
 
   private extractField(text: string, field: string): string | null {
-    // FIELDS attribute style
+    // text/plain key=value style:  FIELD = 'VALUE' or  FIELD = VALUE
+    const plainRe = new RegExp(`^\\s*${field}\\s*=\\s*'?([^'\\n]*)'?`, 'im');
+    const plainMatch = text.match(plainRe);
+    if (plainMatch) return plainMatch[1].trim();
+
+    // XML attribute style
     const attrRe = new RegExp(`\\b${field}="([^"]*)"`, 'i');
     const attrMatch = text.match(attrRe);
     if (attrMatch) return attrMatch[1].trim();
 
-    const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([^<]+)<`, 'i');
+    // XML element
+    const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
     const match = text.match(re);
     return match ? match[1].trim() : null;
   }

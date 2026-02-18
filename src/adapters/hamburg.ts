@@ -15,12 +15,21 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
   private wfsUrl = 'https://geodienste.hamburg.de/HH_WFS_Bodenrichtwerte';
   private discoveredTypeName: string | null = null;
 
-  // Known type names for Hamburg VBORIS WFS (tried in order if discovery fails)
+  // Known type names for Hamburg VBORIS WFS (tried in order if discovery fails).
+  // Hamburg's Urban Data Platform uses the "de.hh.up:" namespace prefix.
   private readonly fallbackTypeNames = [
+    // Hamburg Urban Data Platform prefix (most likely)
+    'de.hh.up:Bodenrichtwert_Zonal',
+    'de.hh.up:Bodenrichtwert_Lagetypisch',
+    'de.hh.up:Bodenrichtwert_aktuell',
+    'de.hh.up:bodenrichtwert',
+    'de.hh.up:bodenrichtwerte',
+    // Generic app: prefix
     'app:Bodenrichtwert_Zonal',
     'app:bodenrichtwert_zonal',
     'app:Bodenrichtwert',
     'app:bodenrichtwert',
+    // Service-namespaced
     'HH_WFS_Bodenrichtwerte:Bodenrichtwert_Zonal',
     'brw:Bodenrichtwert',
     'Bodenrichtwert_Zonal',
@@ -176,19 +185,46 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
 
       const xml = await res.text();
 
-      // Match <Name>, <wfs:Name>, <ows:Name> etc. within FeatureType blocks
-      const typeMatches = [...xml.matchAll(/<(?:[a-zA-Z]+:)?Name>([^<]+)<\/(?:[a-zA-Z]+:)?Name>/g)]
-        .map(m => m[1].trim())
-        .filter(n =>
-          !n.includes('WFS_Capabilities') &&
-          !n.includes('OperationsMetadata') &&
-          !n.includes('WFS') &&
-          n.length > 0 &&
-          n.length < 100
+      // Extract <Name> from <FeatureType> blocks.
+      // The WFS 2.0.0 response uses default namespace so elements are plain <Name>.
+      // Use multiline ([\s\S]*?) to handle names with whitespace/newlines.
+      // Also try case-insensitive to handle <name> or <NAME> variants.
+
+      // Strategy 1: Extract full FeatureType blocks, then Name from each
+      const ftBlocks = [...xml.matchAll(
+        /<(?:[a-zA-Z]*:)?FeatureType[^>]*>([\s\S]*?)<\/(?:[a-zA-Z]*:)?FeatureType>/gi
+      )];
+
+      const typeMatches: string[] = [];
+      for (const block of ftBlocks) {
+        const nameMatch = block[1].match(
+          /<(?:[a-zA-Z]*:)?Name[^>]*>([\s\S]*?)<\/(?:[a-zA-Z]*:)?Name>/i
         );
+        if (nameMatch) {
+          const name = nameMatch[1].trim();
+          if (name.length > 0 && name.length < 120) typeMatches.push(name);
+        }
+      }
+
+      // Strategy 2: Global <Name> search as fallback
+      if (typeMatches.length === 0) {
+        const globalNames = [...xml.matchAll(
+          /<(?:[a-zA-Z]*:)?Name[^>]*>([\s\S]*?)<\/(?:[a-zA-Z]*:)?Name>/gi
+        )]
+          .map(m => m[1].trim())
+          .filter(n =>
+            n.length > 0 &&
+            n.length < 120 &&
+            !n.includes('WFS_Capabilities') &&
+            !n.includes('OperationsMetadata')
+          );
+        typeMatches.push(...globalNames);
+      }
+
+      console.log(`HH WFS: Name-Suche: ${typeMatches.length} Treffer, FeatureType-Blöcke: ${ftBlocks.length}`);
 
       if (typeMatches.length > 0) {
-        console.log(`HH WFS: Gefundene FeatureTypes: ${typeMatches.slice(0, 5).join(', ')}`);
+        console.log(`HH WFS: Gefundene FeatureTypes: ${typeMatches.slice(0, 8).join(', ')}`);
       }
 
       // Priorisierte Suche
