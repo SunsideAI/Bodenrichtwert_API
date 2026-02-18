@@ -6,6 +6,7 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  * Nutzt den LGLN OpenData WFS Endpunkt (doorman/noauth).
  * Auto-Discovery: Holt TypeNames aus GetCapabilities beim ersten Aufruf.
  * Versucht auch jahresspezifische Endpunkte (boris_2024_wfs, boris_2023_wfs).
+ * Schema: VBORIS 2.0 / BRM 3.0 (boris namespace)
  * CRS: EPSG:25832 (UTM Zone 32N)
  * Lizenz: dl-de/by-2-0 (Namensnennung)
  */
@@ -16,7 +17,7 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
 
   private baseUrl = 'https://opendata.lgln.niedersachsen.de/doorman/noauth';
 
-  // Endpunkte in Prioritätsreihenfolge (aktuell zuerst, dann jahresspezifisch)
+  // Endpunkte in Prioritätsreihenfolge
   private endpoints = [
     'boris_wfs',
     'boris_2024_wfs',
@@ -25,6 +26,9 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
 
   // Cache für entdeckte TypeNames pro Endpunkt
   private discoveredTypeNames: Record<string, string[]> = {};
+
+  // Nur BRW-relevante TypeNames (Zonal bevorzugt)
+  private relevantTypePatterns = ['BodenrichtwertZonal', 'BodenrichtwertLagetypisch'];
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
     for (const endpoint of this.endpoints) {
@@ -46,28 +50,19 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
     // TypeNames für diesen Endpunkt entdecken (nur beim ersten Mal)
     let typeNames = this.discoveredTypeNames[endpoint];
     if (!typeNames) {
-      typeNames = await this.discoverTypeNames(wfsUrl);
+      const allTypes = await this.discoverTypeNames(wfsUrl);
+      // Nur BRW-relevante TypeNames filtern
+      typeNames = allTypes.filter(t =>
+        this.relevantTypePatterns.some(p => t.includes(p))
+      );
       this.discoveredTypeNames[endpoint] = typeNames;
-      console.log(`NI ${endpoint}: Discovered typeNames:`, typeNames);
+      console.log(`NI ${endpoint}: Discovered typeNames:`, allTypes, '→ using:', typeNames);
     }
 
     if (typeNames.length === 0) return null;
 
-    // Jeden TypeName versuchen
+    // Jeden TypeName versuchen (GML zuerst, da XtraServer kein JSON unterstützt)
     for (const typeName of typeNames) {
-      // Versuche JSON
-      try {
-        const result = await this.fetchFeatures(wfsUrl, lat, lon, typeName, 'application/json');
-        if (result) return result;
-      } catch { /* next */ }
-
-      // Versuche GeoJSON
-      try {
-        const result = await this.fetchFeatures(wfsUrl, lat, lon, typeName, 'application/geo+json');
-        if (result) return result;
-      } catch { /* next */ }
-
-      // Versuche GML (default)
       try {
         const result = await this.fetchGml(wfsUrl, lat, lon, typeName);
         if (result) return result;
@@ -95,13 +90,11 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
 
       const xml = await res.text();
 
-      // FeatureType Names aus GetCapabilities extrahieren
       const typeNames: string[] = [];
       const nameRegex = /<(?:wfs:)?Name>([^<]+)<\/(?:wfs:)?Name>/g;
       let match;
       while ((match = nameRegex.exec(xml)) !== null) {
         const name = match[1].trim();
-        // Nur relevante FeatureTypes (nicht Service-Name o.ä.)
         if (name && !name.includes('WFS') && !name.includes('Service')) {
           typeNames.push(name);
         }
@@ -114,53 +107,7 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
     }
   }
 
-  /** JSON/GeoJSON GetFeature Abfrage */
-  private async fetchFeatures(wfsUrl: string, lat: number, lon: number, typeName: string, format: string): Promise<NormalizedBRW | null> {
-    const delta = 0.0005;
-    const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`;
-
-    const params = new URLSearchParams({
-      service: 'WFS',
-      version: '2.0.0',
-      request: 'GetFeature',
-      typeNames: typeName,
-      bbox: bbox,
-      outputFormat: format,
-      count: '5',
-    });
-
-    const res = await fetch(`${wfsUrl}?${params}`, {
-      headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!res.ok) return null;
-
-    const text = await res.text();
-    if (!text.trimStart().startsWith('{') && !text.trimStart().startsWith('[')) return null;
-
-    const json = JSON.parse(text);
-    if (!json.features?.length) return null;
-
-    // Debug: Log property keys and first feature for diagnosis
-    const firstProps = json.features[0]?.properties;
-    if (firstProps) {
-      console.log(`NI JSON [${typeName}] keys:`, Object.keys(firstProps));
-      console.log(`NI JSON [${typeName}] first feature:`, JSON.stringify(firstProps).substring(0, 500));
-    }
-
-    // Wohnbau-BRW bevorzugen
-    const wohn = json.features.find(
-      (f: any) => {
-        const nutzung = f.properties?.nuta || f.properties?.NUTA || f.properties?.nutzungsart || f.properties?.NUTZUNG || '';
-        return nutzung.startsWith('W') || nutzung.toLowerCase().includes('wohn');
-      }
-    ) || json.features[0];
-
-    return this.mapProperties(wohn.properties);
-  }
-
-  /** GML GetFeature Abfrage (ohne outputFormat → Server-Default) */
+  /** GML GetFeature Abfrage mit VBORIS 2.0 Parsing */
   private async fetchGml(wfsUrl: string, lat: number, lon: number, typeName: string): Promise<NormalizedBRW | null> {
     const delta = 0.0005;
     const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`;
@@ -186,59 +133,102 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
     if (xml.includes('ExceptionReport') || xml.includes('ServiceException')) return null;
     if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
 
-    // Debug: Log truncated GML response for diagnosis
-    console.log(`NI GML [${typeName}] response (first 1000 chars):`, xml.substring(0, 1000));
+    // Debug: Log more of the response to see feature structure
+    console.log(`NI GML [${typeName}] response (3000 chars):`, xml.substring(0, 3000));
 
-    // BRW-Wert aus GML extrahieren
-    const wert = this.extractGmlValue(xml, ['brw', 'BRW', 'bodenrichtwert', 'Bodenrichtwert', 'wert', 'richtwert']);
-    if (!wert || wert <= 0) return null;
-
-    return {
-      wert,
-      stichtag: this.extractGmlField(xml, ['stag', 'STAG', 'stichtag', 'STICHTAG']) || 'unbekannt',
-      nutzungsart: this.extractGmlField(xml, ['nuta', 'NUTA', 'nutzungsart', 'NUTZUNG']) || 'unbekannt',
-      entwicklungszustand: this.extractGmlField(xml, ['entw', 'ENTW', 'entwicklungszustand']) || 'B',
-      zone: this.extractGmlField(xml, ['wnum', 'WNUM', 'zone', 'ZONE', 'brw_zone']) || '',
-      gemeinde: this.extractGmlField(xml, ['gena', 'GENA', 'gemeinde', 'GEMEINDE']) || '',
-      bundesland: 'Niedersachsen',
-      quelle: 'BORIS-NI (LGLN)',
-      lizenz: '© LGLN, dl-de/by-2-0',
-    };
+    // Parse alle Features und wähle den besten
+    return this.parseBestFeature(xml);
   }
 
-  /** Properties aus JSON-Response mappen (VBORIS Kurz- und Langform) */
-  private mapProperties(p: any): NormalizedBRW {
-    return {
-      wert: p.brw || p.BRW || p.bodenrichtwert || p.wert || 0,
-      stichtag: p.stag || p.STAG || p.stichtag || p.STICHTAG || 'unbekannt',
-      nutzungsart: p.nuta || p.NUTA || p.nutzungsart || p.NUTZUNG || 'unbekannt',
-      entwicklungszustand: p.entw || p.ENTW || p.entwicklungszustand || 'B',
-      zone: p.wnum || p.WNUM || p.zone || p.brw_zone || p.ZONE || '',
-      gemeinde: p.gena || p.GENA || p.gemeinde || p.GEMEINDE || p.gemeinde_name || '',
-      bundesland: 'Niedersachsen',
-      quelle: 'BORIS-NI (LGLN)',
-      lizenz: '© LGLN, dl-de/by-2-0',
-    };
-  }
+  /** Bestes Feature aus GML-Response wählen (Wohnbau bevorzugt) */
+  private parseBestFeature(xml: string): NormalizedBRW | null {
+    // Einzelne BodenrichtwertZonal/Lagetypisch Features extrahieren
+    const featureRegex = /<boris:BR_Bodenrichtwert(?:Zonal|Lagetypisch)[^>]*>([\s\S]*?)<\/boris:BR_Bodenrichtwert(?:Zonal|Lagetypisch)>/g;
+    const features: string[] = [];
+    let match;
+    while ((match = featureRegex.exec(xml)) !== null) {
+      features.push(match[1]);
+    }
 
-  private extractGmlValue(xml: string, fields: string[]): number | null {
-    for (const field of fields) {
-      const re = new RegExp(`<[^>]*:?${field}[^>]*>([\\d.,]+)<`, 'i');
-      const match = xml.match(re);
-      if (match) {
-        const val = parseFloat(match[1].replace(',', '.'));
-        if (val > 0) return val;
+    if (features.length === 0) {
+      // Fallback: gesamtes XML als ein Feature behandeln
+      features.push(xml);
+    }
+
+    // Wohnbau-Feature bevorzugen
+    let bestFeature = features[0];
+    for (const feature of features) {
+      const nutzung = this.extractExactField(feature, 'art') ||
+                       this.extractExactField(feature, 'nutzungsartBodenrichtwert') || '';
+      if (nutzung.startsWith('W') || nutzung.toLowerCase().includes('wohn')) {
+        bestFeature = feature;
+        break;
       }
+    }
+
+    // VBORIS 2.0 Feldnamen (exakte Matches, keine Substrings!)
+    const wert = this.extractExactNumber(bestFeature, 'bodenrichtwert');
+    if (!wert || wert <= 0) {
+      console.warn('NI: bodenrichtwert field not found or zero');
+      return null;
+    }
+
+    const stichtag = this.extractExactField(bestFeature, 'stichtag') || 'unbekannt';
+
+    // Nutzungsart: verschachtelt in boris:nutzung → boris:BR_Nutzung → boris:art
+    const nutzungsart = this.extractExactField(bestFeature, 'art') ||
+                         this.extractExactField(bestFeature, 'nutzungsartBodenrichtwert') ||
+                         'unbekannt';
+
+    const entwicklungszustand = this.extractExactField(bestFeature, 'entwicklungszustand') || 'B';
+    const ortsteil = this.extractExactField(bestFeature, 'ortsteil') || '';
+
+    const result: NormalizedBRW = {
+      wert,
+      stichtag,
+      nutzungsart,
+      entwicklungszustand,
+      zone: '', // zone ist Geometrie in VBORIS 2.0, kein Textfeld
+      gemeinde: ortsteil,
+      bundesland: 'Niedersachsen',
+      quelle: 'BORIS-NI (LGLN)',
+      lizenz: '© LGLN, dl-de/by-2-0',
+    };
+
+    console.log('NI parsed result:', result);
+    return result;
+  }
+
+  /**
+   * Exakten Feldnamen aus GML extrahieren (numerisch).
+   * Matched nur den exakten lokalen Elementnamen, nicht Substrings.
+   * z.B. "bodenrichtwert" matched <boris:bodenrichtwert> aber NICHT <boris:bodenrichtwertklassifikation>
+   */
+  private extractExactNumber(xml: string, field: string): number | null {
+    // Match: <ns:field> or <ns:field attr="..."> but NOT <ns:fieldSuffix>
+    const re = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([\\d.,]+)<`, 'i');
+    const match = xml.match(re);
+    if (match) {
+      // Deutsche Zahlenformate: "100,50" → 100.50, "1.234,50" → 1234.50
+      let numStr = match[1];
+      if (numStr.includes(',')) {
+        // Tausendertrennzeichen (Punkt) entfernen, Komma → Punkt
+        numStr = numStr.replace(/\./g, '').replace(',', '.');
+      }
+      const val = parseFloat(numStr);
+      if (val > 0 && isFinite(val)) return val;
     }
     return null;
   }
 
-  private extractGmlField(xml: string, fields: string[]): string | null {
-    for (const field of fields) {
-      const re = new RegExp(`<[^>]*:?${field}[^>]*>([^<]+)<`, 'i');
-      const match = xml.match(re);
-      if (match) return match[1].trim();
-    }
+  /**
+   * Exakten Feldnamen aus GML extrahieren (Text).
+   * Matched nur den exakten lokalen Elementnamen, nicht Substrings.
+   */
+  private extractExactField(xml: string, field: string): string | null {
+    const re = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
+    const match = xml.match(re);
+    if (match) return match[1].trim();
     return null;
   }
 
