@@ -15,64 +15,77 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
 
   private wmsUrl = 'https://service.gdi-sh.de/WMS_SH_FD_VBORIS';
 
+  // Mögliche Layer-Namen – VBORIS SH nutzt jahresspezifische Layer
+  private layerCandidates = [
+    'Stichtag_2024', 'Stichtag_2023', 'Stichtag_2022',
+    'BRW_Bauland', 'Bauland', 'BRW', 'bodenrichtwerte', '0',
+  ];
+
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    try {
-      const delta = 0.001;
-      const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
-
-      const params = new URLSearchParams({
-        SERVICE: 'WMS',
-        VERSION: '1.1.1',
-        REQUEST: 'GetFeatureInfo',
-        LAYERS: 'BRW_Bauland',
-        QUERY_LAYERS: 'BRW_Bauland',
-        SRS: 'EPSG:4326',
-        BBOX: bbox,
-        WIDTH: '101',
-        HEIGHT: '101',
-        X: '50',
-        Y: '50',
-        INFO_FORMAT: 'text/xml',
-        FEATURE_COUNT: '5',
-        STYLES: '',
-        FORMAT: 'image/png',
-      });
-
-      const url = `${this.wmsUrl}?${params}`;
-      const res = await fetch(url, {
-        headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-        signal: AbortSignal.timeout(10000),
-      });
-
-      if (!res.ok) {
-        console.error(`SH WMS error: ${res.status}`);
-        return null;
+    for (const layer of this.layerCandidates) {
+      try {
+        const result = await this.queryWms(lat, lon, layer);
+        if (result) return result;
+      } catch {
+        // Nächsten Layer versuchen
       }
-
-      const text = await res.text();
-      const wert = this.extractValue(text);
-      if (!wert || wert <= 0) return null;
-
-      return {
-        wert,
-        stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'STICHTAG') || 'aktuell',
-        nutzungsart: this.extractField(text, 'nutzungsart') || 'W',
-        entwicklungszustand: this.extractField(text, 'entwicklungszustand') || 'B',
-        zone: this.extractField(text, 'zone') || this.extractField(text, 'ZONE') || '',
-        gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'GEMEINDE') || '',
-        bundesland: 'Schleswig-Holstein',
-        quelle: 'VBORIS-SH',
-        lizenz: '© LVermGeo SH (Ansicht frei)',
-      };
-    } catch (err) {
-      console.error('SH adapter error:', err);
-      return null;
     }
+    console.error('SH adapter: Kein Treffer mit allen Layer-Kandidaten');
+    return null;
+  }
+
+  private async queryWms(lat: number, lon: number, layer: string): Promise<NormalizedBRW | null> {
+    const delta = 0.001;
+    const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
+
+    const params = new URLSearchParams({
+      SERVICE: 'WMS',
+      VERSION: '1.1.1',
+      REQUEST: 'GetFeatureInfo',
+      LAYERS: layer,
+      QUERY_LAYERS: layer,
+      SRS: 'EPSG:4326',
+      BBOX: bbox,
+      WIDTH: '101',
+      HEIGHT: '101',
+      X: '50',
+      Y: '50',
+      INFO_FORMAT: 'text/xml',
+      FEATURE_COUNT: '5',
+      STYLES: '',
+      FORMAT: 'image/png',
+    });
+
+    const url = `${this.wmsUrl}?${params}`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!res.ok) return null;
+
+    const text = await res.text();
+    if (text.includes('ServiceException') || text.includes('ExceptionReport')) return null;
+
+    const wert = this.extractValue(text);
+    if (!wert || wert <= 0) return null;
+
+    return {
+      wert,
+      stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || 'aktuell',
+      nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || 'W',
+      entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || 'B',
+      zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || '',
+      gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || '',
+      bundesland: 'Schleswig-Holstein',
+      quelle: 'VBORIS-SH',
+      lizenz: '© LVermGeo SH (Ansicht frei)',
+    };
   }
 
   private extractValue(text: string): number | null {
     const patterns = [
-      /<(?:brw|wert|bodenrichtwert|richtwert|BRW|Wert|Bodenrichtwert)>([\d.,]+)<\//i,
+      /<[^>]*:?(?:brw|wert|bodenrichtwert|richtwert|BRW|Wert|Bodenrichtwert)[^>]*>([\d.,]+)<\//i,
       /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m|€\/m)/i,
       /(?:brw|wert|bodenrichtwert)[:\s=]*([\d.,]+)/i,
     ];
@@ -87,7 +100,7 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   }
 
   private extractField(text: string, field: string): string | null {
-    const re = new RegExp(`<${field}[^>]*>([^<]+)</${field}>`, 'i');
+    const re = new RegExp(`<[^>]*:?${field}[^>]*>([^<]+)<`, 'i');
     const match = text.match(re);
     return match ? match[1].trim() : null;
   }

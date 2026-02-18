@@ -12,7 +12,9 @@ export declare class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
     stateCode: string;
     isFallback: boolean;
     private wmsUrl;
+    private layerCandidates;
     getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null>;
+    private queryWms;
     private extractValue;
     private extractField;
     healthCheck(): Promise<boolean>;
