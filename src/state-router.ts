@@ -3,28 +3,42 @@ import { HamburgAdapter } from './adapters/hamburg.js';
 import { NRWAdapter } from './adapters/nrw.js';
 import { RheinlandPfalzAdapter } from './adapters/rlp.js';
 import { BrandenburgAdapter } from './adapters/brandenburg.js';
+import { BerlinAdapter } from './adapters/berlin.js';
+import { HessenAdapter } from './adapters/hessen.js';
+import { NiedersachsenAdapter } from './adapters/niedersachsen.js';
+import { ThueringenAdapter } from './adapters/thueringen.js';
+import { MecklenburgVorpommernAdapter } from './adapters/mecklenburg-vorpommern.js';
+import { SachsenAdapter } from './adapters/sachsen.js';
+import { SachsenAnhaltAdapter } from './adapters/sachsen-anhalt.js';
+import { SchleswigHolsteinAdapter } from './adapters/schleswig-holstein.js';
 import { FallbackAdapter } from './adapters/fallback.js';
 
 /**
  * Adapter-Registry: Bundesland → Adapter-Instanz.
- * Neue Bundesländer = neuer Adapter, zero Refactoring.
+ * 16/16 Bundesländer abgedeckt – 12 automatisch, 4 Fallback.
  */
 const adapterRegistry: Record<string, BodenrichtwertAdapter> = {
-  // Phase 1: Bestätigte freie WFS
+  // Tier 1: WFS-Adapter (freie Daten, hohe Qualität)
   'Hamburg': new HamburgAdapter(),
   'Nordrhein-Westfalen': new NRWAdapter(),
   'Rheinland-Pfalz': new RheinlandPfalzAdapter(),
   'Brandenburg': new BrandenburgAdapter(),
+  'Berlin': new BerlinAdapter(),
+  'Hessen': new HessenAdapter(),
+  'Niedersachsen': new NiedersachsenAdapter(),
+  'Thüringen': new ThueringenAdapter(),
+  'Mecklenburg-Vorpommern': new MecklenburgVorpommernAdapter(),
 
-  // Phase 2: Folgen als nächstes
-  // 'Berlin': new BerlinAdapter(),
-  // 'Hessen': new HessenAdapter(),
-  // 'Mecklenburg-Vorpommern': new MVAdapter(),
+  // Tier 2: WMS-Adapter (GetFeatureInfo, eingeschränkter)
+  'Sachsen': new SachsenAdapter(),
+  'Sachsen-Anhalt': new SachsenAnhaltAdapter(),
+  'Schleswig-Holstein': new SchleswigHolsteinAdapter(),
 
-  // Problem-Bundesländer: Fallback
+  // Tier 3: Fallback (kein freier Zugang / Lizenzeinschränkungen)
   'Bayern': new FallbackAdapter('Bayern'),
   'Baden-Württemberg': new FallbackAdapter('Baden-Württemberg'),
   'Bremen': new FallbackAdapter('Bremen'),
+  'Saarland': new FallbackAdapter('Saarland'),
 };
 
 /**

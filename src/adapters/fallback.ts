@@ -29,6 +29,12 @@ const FALLBACK_CONFIGS: Record<string, FallbackConfig> = {
     reason: 'Bremen bietet derzeit keinen freien WFS-Zugang.',
     borisUrl: 'https://www.gutachterausschuss.bremen.de',
   },
+  'Saarland': {
+    state: 'Saarland',
+    stateCode: 'SL',
+    reason: 'Saarland erlaubt nur Ansicht im Geoportal, Einbindung in andere Anwendungen ist nicht gestattet.',
+    borisUrl: 'https://geoportal.saarland.de/article/Bodenrichtwerte/',
+  },
 };
 
 /**
