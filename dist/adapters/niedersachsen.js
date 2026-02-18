@@ -46,7 +46,7 @@ export class NiedersachsenAdapter {
             // Nur BRW-relevante TypeNames filtern
             typeNames = allTypes.filter(t => this.relevantTypePatterns.some(p => t.includes(p)));
             this.discoveredTypeNames[endpoint] = typeNames;
-            console.log(`NI ${endpoint}: Discovered typeNames:`, allTypes, '→ using:', typeNames);
+            console.log(`NI ${endpoint}: Using typeNames:`, typeNames);
         }
         if (typeNames.length === 0)
             return null;
@@ -115,8 +115,6 @@ export class NiedersachsenAdapter {
             return null;
         if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"'))
             return null;
-        // Debug: Log more of the response to see feature structure
-        console.log(`NI GML [${typeName}] response (3000 chars):`, xml.substring(0, 3000));
         // Parse alle Features und wähle den besten
         return this.parseBestFeature(xml);
     }
@@ -167,7 +165,6 @@ export class NiedersachsenAdapter {
             quelle: 'BORIS-NI (LGLN)',
             lizenz: '© LGLN, dl-de/by-2-0',
         };
-        console.log('NI parsed result:', result);
         return result;
     }
     /**
