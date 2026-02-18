@@ -4,8 +4,13 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  * Hessen Adapter
  *
  * Nutzt den GDS Hessen WFS 2.0 Endpunkt (BORIS Hessen).
- * Server: XtraServer – JSON evtl. nicht unterstützt, daher JSON+GML-Fallback.
- * Daten: Bodenrichtwerte zonal nach BRM 2.1.0 Schema
+ * Server (XtraServer): JSON wird NICHT unterstützt (400 Bad Request).
+ * Verwendet nur GML/WFS.
+ *
+ * GML-Struktur (BRM 2.1.0):
+ *   <boris:bodenrichtwert uom="EUR/m^2">8500</boris:bodenrichtwert>
+ *   ↑ Attribut im Tag – Regex muss Attribute erlauben!
+ *
  * CRS: EPSG:25832, unterstützt auch EPSG:4258
  * Lizenz: Datenlizenz Deutschland – Zero – Version 2.0
  */
@@ -16,18 +21,12 @@ export class HessenAdapter implements BodenrichtwertAdapter {
 
   private wfsUrl = 'https://www.gds.hessen.de/wfs2/boris/cgi-bin/brw/2024/wfs';
 
-  // Max realistic BRW in Germany (even for best Munich/Frankfurt commercial)
+  // Max realistic BRW in Germany
   private readonly MAX_BRW = 500_000;
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    // Versuche zuerst JSON, dann GML
-    try {
-      const result = await this.tryJsonQuery(lat, lon);
-      if (result) return result;
-    } catch {
-      // JSON fehlgeschlagen
-    }
-
+    // JSON is NOT supported by this server (returns 400 Bad Request).
+    // Use GML only.
     try {
       return await this.tryGmlQuery(lat, lon);
     } catch (err) {
@@ -36,69 +35,9 @@ export class HessenAdapter implements BodenrichtwertAdapter {
     }
   }
 
-  private async tryJsonQuery(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    const delta = 0.0005;
-    // EPSG:4258 (ETRS89) statt 4326 – vom Service explizit unterstützt
-    const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4258`;
-
-    const params = new URLSearchParams({
-      service: 'WFS',
-      version: '2.0.0',
-      request: 'GetFeature',
-      typeNames: 'boris:BR_BodenrichtwertZonal',
-      bbox: bbox,
-      outputFormat: 'application/json',
-      count: '5',
-    });
-
-    const url = `${this.wfsUrl}?${params}`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!res.ok) return null;
-
-    const text = await res.text();
-    // Prüfe ob es tatsächlich JSON ist (XtraServer gibt evtl. GML zurück)
-    if (!text.trimStart().startsWith('{') && !text.trimStart().startsWith('[')) return null;
-
-    const json = JSON.parse(text);
-    if (!json.features?.length) return null;
-
-    // Wohnbau-BRW bevorzugen
-    const wohn = json.features.find(
-      (f: any) => {
-        const nutzung = f.properties?.nutzungsart || f.properties?.NUTZUNG || f.properties?.nuta || '';
-        return nutzung.startsWith('W') || nutzung.toLowerCase().includes('wohn');
-      }
-    ) || json.features[0];
-
-    const p = wohn.properties;
-
-    // BRM 2.1.0: 'brw' is the monetary value field.
-    // 'bodenrichtwert' may be an object ID or zone reference – try it last.
-    const wert = this.pickValidWert([p.brw, p.BRW, p.wert, p.bodenrichtwert]);
-    if (!wert) {
-      console.error('HE JSON: Kein valider Wert. Properties:', JSON.stringify(p).slice(0, 500));
-      return null;
-    }
-
-    return {
-      wert,
-      stichtag: p.stichtag || p.stag || p.STICHTAG || '2024-01-01',
-      nutzungsart: p.nutzungsart || p.nuta || p.NUTZUNG || 'unbekannt',
-      entwicklungszustand: p.entwicklungszustand || p.entw || p.ENTW || 'B',
-      zone: p.zone || p.brw_zone || p.ZONE || p.wnum || '',
-      gemeinde: p.gemeinde || p.gena || p.GEMEINDE || '',
-      bundesland: 'Hessen',
-      quelle: 'BORIS-Hessen',
-      lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
-    };
-  }
-
   private async tryGmlQuery(lat: number, lon: number): Promise<NormalizedBRW | null> {
     const delta = 0.0005;
+    // EPSG:4258 (ETRS89) – explicitly supported by this server
     const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4258`;
 
     const params = new URLSearchParams({
@@ -120,46 +59,45 @@ export class HessenAdapter implements BodenrichtwertAdapter {
 
     const xml = await res.text();
     if (xml.includes('ExceptionReport') || xml.includes('ServiceException')) return null;
-    if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
+    if (xml.includes('numberReturned="0"') || xml.includes('numberOfFeatures="0"')) return null;
 
-    // Match exact BRW/brw tag (not BRWZNR, BEZUGSWERT, etc.)
-    const wert = this.extractGmlValue(xml, ['brw', 'BRW', 'wert', 'bodenrichtwert']);
-    if (!wert) return null;
+    // BRM 2.1.0: <boris:bodenrichtwert uom="EUR/m^2">8500</boris:bodenrichtwert>
+    // The tag has an attribute (uom), so regex must allow [^>]* after the tag name.
+    const wert = this.extractGmlValue(xml, ['bodenrichtwert']);
+    if (!wert) {
+      console.error('HE GML: Kein valider bodenrichtwert Wert. XML snippet:', xml.slice(0, 800));
+      return null;
+    }
 
     return {
       wert,
-      stichtag: this.extractGmlField(xml, ['stichtag', 'stag', 'STICHTAG']) || '2024-01-01',
+      stichtag: this.extractGmlField(xml, ['stichtag', 'wertermittlungsstichtag', 'STICHTAG', 'stag']) || '2024-01-01',
       nutzungsart: this.extractGmlField(xml, ['nutzungsart', 'nuta', 'NUTZUNG']) || 'unbekannt',
       entwicklungszustand: this.extractGmlField(xml, ['entwicklungszustand', 'entw', 'ENTW']) || 'B',
-      zone: this.extractGmlField(xml, ['zone', 'wnum', 'ZONE', 'brw_zone']) || '',
-      gemeinde: this.extractGmlField(xml, ['gemeinde', 'gena', 'GEMEINDE']) || '',
+      zone: this.extractGmlField(xml, ['zone', 'wnum', 'ZONE', 'brw_zone', 'bodenrichtwertzone']) || '',
+      gemeinde: this.extractGmlField(xml, ['gemeinde', 'gena', 'GEMEINDE', 'gemeindebezeichnung']) || '',
       bundesland: 'Hessen',
       quelle: 'BORIS-Hessen',
       lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
     };
   }
 
-  /** Try numeric candidates in order, return first in realistic BRW range */
-  private pickValidWert(candidates: any[]): number | null {
-    for (const c of candidates) {
-      if (c == null) continue;
-      const v = parseFloat(String(c));
-      if (v > 0 && v <= this.MAX_BRW && isFinite(v)) return v;
-    }
-    return null;
-  }
-
+  /**
+   * Extracts a numeric value from a GML element.
+   * Crucially allows attributes in the opening tag, e.g.:
+   *   <boris:bodenrichtwert uom="EUR/m^2">8500</boris:bodenrichtwert>
+   */
   private extractGmlValue(xml: string, fields: string[]): number | null {
     for (const field of fields) {
-      // Exact tag match: <brw> or <ns:brw> but NOT <brwznr> or <bezugswert>
-      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([\\d.,]+)<`, 'i');
+      // Allow optional namespace prefix and optional attributes after the field name
+      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
       const match = xml.match(re);
       if (match) {
-        let numStr = match[1];
-        // Deutsche Zahlenformat: 1.250,50 → 1250.50
-        if (numStr.includes(',')) {
-          numStr = numStr.replace(/\./g, '').replace(',', '.');
-        }
+        const raw = match[1].trim();
+        // German number format: 1.250,50 → 1250.50
+        const numStr = raw.includes(',')
+          ? raw.replace(/\./g, '').replace(',', '.')
+          : raw;
         const val = parseFloat(numStr);
         if (val > 0 && val <= this.MAX_BRW && isFinite(val)) return val;
       }
@@ -169,7 +107,8 @@ export class HessenAdapter implements BodenrichtwertAdapter {
 
   private extractGmlField(xml: string, fields: string[]): string | null {
     for (const field of fields) {
-      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([^<]+)<`, 'i');
+      // Allow optional attributes in the opening tag
+      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
       const match = xml.match(re);
       if (match) return match[1].trim();
     }
