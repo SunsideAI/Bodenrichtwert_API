@@ -3,8 +3,8 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  * Sachsen Adapter
  *
  * Nutzt den WMS GetFeatureInfo Endpunkt (kein WFS verfügbar).
- * Daten: Bodenrichtwerte (jahresspezifischer Dienst)
- * CRS: EPSG:25833 (UTM Zone 33N)
+ * URL: landesvermessung.sachsen.de mit cfg-Parameter für Jahrgang.
+ * CRS: EPSG:25833 (nativ), BBOX in EPSG:4326 (WMS 1.1.1)
  * Lizenz: Erlaubnis- und gebührenfrei
  */
 export declare class SachsenAdapter implements BodenrichtwertAdapter {

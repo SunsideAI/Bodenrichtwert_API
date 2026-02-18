@@ -73,8 +73,11 @@ export class HessenAdapter implements BodenrichtwertAdapter {
 
     const p = wohn.properties;
 
+    const wert = parseFloat(String(p.bodenrichtwert || p.brw || p.BRW || p.wert || 0));
+    if (!wert || wert <= 0) return null;
+
     return {
-      wert: p.bodenrichtwert || p.brw || p.BRW || p.wert || 0,
+      wert,
       stichtag: p.stichtag || p.STICHTAG || '2024-01-01',
       nutzungsart: p.nutzungsart || p.NUTZUNG || 'unbekannt',
       entwicklungszustand: p.entwicklungszustand || p.ENTW || 'B',
@@ -132,8 +135,13 @@ export class HessenAdapter implements BodenrichtwertAdapter {
       const re = new RegExp(`<[^>]*:?${field}[^>]*>([\\d.,]+)<`, 'i');
       const match = xml.match(re);
       if (match) {
-        const val = parseFloat(match[1].replace(',', '.'));
-        if (val > 0) return val;
+        let numStr = match[1];
+        // Deutsche Zahlenformat: 1.250,50 → 1250.50
+        if (numStr.includes(',')) {
+          numStr = numStr.replace(/\./g, '').replace(',', '.');
+        }
+        const val = parseFloat(numStr);
+        if (val > 0 && isFinite(val)) return val;
       }
     }
     return null;
