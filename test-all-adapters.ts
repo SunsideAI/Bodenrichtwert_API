@@ -19,6 +19,7 @@ import { BerlinAdapter } from './src/adapters/berlin.js';
 import { NRWAdapter } from './src/adapters/nrw.js';
 import { NiedersachsenAdapter } from './src/adapters/niedersachsen.js';
 import { RheinlandPfalzAdapter } from './src/adapters/rlp.js';
+import { BremenAdapter } from './src/adapters/bremen.js';
 
 // ═══════════════════════════════════════════════
 // Testfälle: Bekannte Adressen mit Koordinaten
@@ -120,6 +121,14 @@ const TEST_CASES = [
     lat: 50.0014,
     lon: 8.2592,
     adresse: 'Langgasse 1, 65183, Wiesbaden',
+  },
+  {
+    code: 'HB',
+    name: 'Bremen',
+    adapter: new BremenAdapter(),
+    lat: 53.0793,
+    lon: 8.8017,
+    adresse: 'Obernstraße 1, 28195, Bremen',
   },
 ];
 
