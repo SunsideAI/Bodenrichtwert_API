@@ -58,13 +58,23 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
   }
 
   /**
-   * Build multiple bbox strings to work around axis order ambiguity.
-   * Deegree WFS 2.0.0 with EPSG:4326 should use (lat,lon) but sometimes expects (lon,lat).
+   * Build multiple bbox strings to work around CRS and axis order issues.
+   * Hamburg's deegree WFS uses EPSG:25832 (UTM Zone 32N) natively.
+   * EPSG:4326 queries return 0 features, so we convert to UTM first.
    */
   private buildBboxStrategies(lat: number, lon: number): { bbox: string; version: string; typeParam: string }[] {
+    const { easting, northing } = this.wgs84ToUtm32(lat, lon);
+    const utmDelta = 100; // ~100m radius in UTM meters
     const delta = 0.001;
+
     return [
-      // WFS 2.0.0: lat,lon order (OGC standard for EPSG:4326)
+      // EPSG:25832 (native CRS) – most likely to work
+      {
+        bbox: `${easting - utmDelta},${northing - utmDelta},${easting + utmDelta},${northing + utmDelta},urn:ogc:def:crs:EPSG::25832`,
+        version: '2.0.0',
+        typeParam: 'typeNames',
+      },
+      // WFS 2.0.0: lat,lon order with EPSG:4326
       {
         bbox: `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`,
         version: '2.0.0',
@@ -76,13 +86,49 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
         version: '2.0.0',
         typeParam: 'typeNames',
       },
-      // WFS 1.1.0: lon,lat with EPSG:4326
-      {
-        bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta},EPSG:4326`,
-        version: '1.1.0',
-        typeParam: 'typeName',
-      },
     ];
+  }
+
+  /**
+   * Convert WGS84 lat/lon to UTM Zone 32N (EPSG:25832).
+   * Standard Transverse Mercator projection formulas.
+   */
+  private wgs84ToUtm32(lat: number, lon: number): { easting: number; northing: number } {
+    const a = 6378137;
+    const f = 1 / 298.257223563;
+    const k0 = 0.9996;
+    const lon0 = 9; // central meridian for zone 32
+    const e2 = 2 * f - f * f;
+
+    const latRad = lat * Math.PI / 180;
+    const lon0Rad = lon0 * Math.PI / 180;
+    const lonRad = lon * Math.PI / 180;
+
+    const N = a / Math.sqrt(1 - e2 * Math.sin(latRad) ** 2);
+    const T = Math.tan(latRad) ** 2;
+    const C = (e2 / (1 - e2)) * Math.cos(latRad) ** 2;
+    const A = Math.cos(latRad) * (lonRad - lon0Rad);
+
+    const M = a * (
+      (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * latRad
+      - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * Math.sin(2 * latRad)
+      + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * Math.sin(4 * latRad)
+      - (35 * e2 ** 3 / 3072) * Math.sin(6 * latRad)
+    );
+
+    const easting = 500000 + k0 * N * (
+      A + (1 - T + C) * A ** 3 / 6
+      + (5 - 18 * T + T ** 2 + 72 * C - 58 * (e2 / (1 - e2))) * A ** 5 / 120
+    );
+    const northing = k0 * (
+      M + N * Math.tan(latRad) * (
+        A ** 2 / 2
+        + (5 - T + 9 * C + 4 * C ** 2) * A ** 4 / 24
+        + (61 - 58 * T + T ** 2 + 600 * C - 330 * (e2 / (1 - e2))) * A ** 6 / 720
+      )
+    );
+
+    return { easting, northing };
   }
 
   private async tryWfsGml(
