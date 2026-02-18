@@ -27,17 +27,16 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   private discoveredLayers: string[] | null = null;
   private discoveredUrl: string | null = null;
 
-  // Static layer candidates – tried when GetCapabilities fails
+  // Static layer candidates – tried when GetCapabilities fails.
+  // SH uses "Stichtag_YYYY" naming (confirmed from DANord VBORIS viewer).
   private readonly layerCandidates = [
-    // VBORIS date-keyed layer names (SH uses date suffix YYYYMMDD)
-    'vBODENRICHTWERTZONE_20240101', 'vBODENRICHTWERTZONE_20230101', 'vBODENRICHTWERTZONE_20220101',
-    'VBODENRICHTWERTZZONE_20240101',
-    // Year-based
-    'Stichtag_2024', 'Stichtag_2023', 'Stichtag_2022',
-    // Generic VBORIS names
-    'brw_aktuell', 'BRW_aktuell', 'brw_zonal', 'BRW_Zonal',
-    'Bodenrichtwert', 'bodenrichtwert', 'BRW', 'brw',
-    'BRW_Bauland', 'Bauland', 'bodenrichtwerte',
+    // SH-specific "Stichtag_YYYY" naming (confirmed from DANord viewer URLs)
+    'Stichtag_2024', 'Stichtag_2022', 'Stichtag_2020',
+    'Stichtag_2018', 'Stichtag_2016', 'Stichtag_2014',
+    // VBORIS date-keyed layer names (alternative format)
+    'vBODENRICHTWERTZONE_20240101', 'vBODENRICHTWERTZONE_20220101',
+    // Generic names
+    'brw_aktuell', 'Bodenrichtwert', 'bodenrichtwert', 'BRW', 'brw',
     // Numeric fallback
     '0', '1',
   ];
@@ -81,104 +80,214 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   }
 
   private async discoverService(): Promise<void> {
+    // Try both WMS 1.1.1 and 1.3.0 for GetCapabilities
     for (const baseUrl of this.wmsUrls) {
-      try {
-        const params = new URLSearchParams({
-          SERVICE: 'WMS',
-          VERSION: '1.1.1',
-          REQUEST: 'GetCapabilities',
-        });
+      for (const version of ['1.3.0', '1.1.1']) {
+        try {
+          const params = new URLSearchParams({
+            SERVICE: 'WMS',
+            VERSION: version,
+            REQUEST: 'GetCapabilities',
+          });
 
-        const res = await fetch(`${baseUrl}?${params}`, {
-          headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-          signal: AbortSignal.timeout(8000),
-        });
+          const res = await fetch(`${baseUrl}?${params}`, {
+            headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+            signal: AbortSignal.timeout(8000),
+          });
 
-        if (!res.ok) continue;
+          if (!res.ok) {
+            console.log(`SH WMS: GetCapabilities ${version} at ${baseUrl} → ${res.status}`);
+            continue;
+          }
 
-        const xml = await res.text();
-        if (!xml.includes('<WMT_MS_Capabilities') && !xml.includes('<WMS_Capabilities')) continue;
+          const xml = await res.text();
+          if (!xml.includes('<WMT_MS_Capabilities') && !xml.includes('<WMS_Capabilities')) {
+            console.log(`SH WMS: GetCapabilities ${version} at ${baseUrl} → not a valid WMS response (${xml.substring(0, 100)})`);
+            continue;
+          }
 
-        // Extract <Name> elements from layer sections
-        const layers = [...xml.matchAll(/<Name>([^<]+)<\/Name>/gi)]
-          .map(m => m[1].trim())
-          .filter(n => n.length > 0 && n.length < 100 && !n.includes('WMS') && !n.includes('http'));
+          // Extract <Name> elements from layer sections
+          const layers = [...xml.matchAll(/<Name>([^<]+)<\/Name>/gi)]
+            .map(m => m[1].trim())
+            .filter(n => n.length > 0 && n.length < 100 && !n.includes('WMS') && !n.includes('http'));
 
-        if (layers.length > 0) {
-          console.log(`SH WMS: Discovered layers at ${baseUrl}: ${layers.slice(0, 8).join(', ')}`);
-          // Prefer BRW/Bodenrichtwert layers, filter out group layers
-          const brwLayers = layers.filter(n =>
-            n.toLowerCase().includes('brw') ||
-            n.toLowerCase().includes('bodenrichtwert') ||
-            n.toLowerCase().includes('stichtag') ||
-            n.toLowerCase().includes('bauland')
-          );
-          this.discoveredLayers = brwLayers.length > 0 ? brwLayers : layers;
-          this.discoveredUrl = baseUrl;
-          return;
+          if (layers.length > 0) {
+            console.log(`SH WMS: Discovered ${layers.length} layers at ${baseUrl} (v${version}): ${layers.slice(0, 10).join(', ')}`);
+            // Prefer BRW/Bodenrichtwert layers, filter out group layers
+            const brwLayers = layers.filter(n =>
+              n.toLowerCase().includes('brw') ||
+              n.toLowerCase().includes('bodenrichtwert') ||
+              n.toLowerCase().includes('stichtag') ||
+              n.toLowerCase().includes('bauland')
+            );
+            this.discoveredLayers = brwLayers.length > 0 ? brwLayers : layers;
+            this.discoveredUrl = baseUrl;
+            return;
+          }
+        } catch (err) {
+          console.log(`SH WMS: GetCapabilities ${version} at ${baseUrl} → error: ${err instanceof Error ? err.message : err}`);
         }
-      } catch {
-        // Try next URL
       }
     }
+    console.log('SH WMS: Discovery failed for all URLs, using static layer candidates');
   }
 
   private async queryWms(lat: number, lon: number, wmsUrl: string, layer: string): Promise<NormalizedBRW | null> {
     const delta = 0.001;
-    const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
-    // Try text/plain first (like Sachsen), then text/xml
-    for (const infoFormat of ['text/plain', 'text/xml', 'application/json']) {
-      try {
-        const params = new URLSearchParams({
-          SERVICE: 'WMS',
-          VERSION: '1.1.1',
-          REQUEST: 'GetFeatureInfo',
-          LAYERS: layer,
-          QUERY_LAYERS: layer,
-          SRS: 'EPSG:4326',
-          BBOX: bbox,
-          WIDTH: '101',
-          HEIGHT: '101',
-          X: '50',
-          Y: '50',
-          INFO_FORMAT: infoFormat,
-          FEATURE_COUNT: '5',
-          STYLES: '',
-          FORMAT: 'image/png',
-        });
+    // Try both WMS 1.1.1 and 1.3.0 since SH may only support 1.3.0
+    const wmsVersions: Array<{ version: string; bbox: string; srsParam: string; srs: string; xParam: string; yParam: string }> = [
+      // WMS 1.1.1: SRS, X/Y, bbox = lon,lat,lon,lat
+      {
+        version: '1.1.1',
+        bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`,
+        srsParam: 'SRS',
+        srs: 'EPSG:4326',
+        xParam: 'X',
+        yParam: 'Y',
+      },
+      // WMS 1.3.0: CRS, I/J, bbox = lat,lon,lat,lon (axis order flipped for EPSG:4326)
+      {
+        version: '1.3.0',
+        bbox: `${lat - delta},${lon - delta},${lat + delta},${lon + delta}`,
+        srsParam: 'CRS',
+        srs: 'EPSG:4326',
+        xParam: 'I',
+        yParam: 'J',
+      },
+    ];
 
-        const url = `${wmsUrl}?${params}`;
-        const res = await fetch(url, {
-          headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-          signal: AbortSignal.timeout(10000),
-        });
+    // text/html is often the only supported format for GDI-DE services
+    for (const v of wmsVersions) {
+      for (const infoFormat of ['text/html', 'text/plain', 'text/xml', 'application/vnd.ogc.gml']) {
+        try {
+          const params = new URLSearchParams({
+            SERVICE: 'WMS',
+            VERSION: v.version,
+            REQUEST: 'GetFeatureInfo',
+            LAYERS: layer,
+            QUERY_LAYERS: layer,
+            [v.srsParam]: v.srs,
+            BBOX: v.bbox,
+            WIDTH: '101',
+            HEIGHT: '101',
+            [v.xParam]: '50',
+            [v.yParam]: '50',
+            INFO_FORMAT: infoFormat,
+            FEATURE_COUNT: '5',
+            STYLES: '',
+            FORMAT: 'image/png',
+          });
 
-        if (!res.ok) continue;
+          const url = `${wmsUrl}?${params}`;
+          const res = await fetch(url, {
+            headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+            signal: AbortSignal.timeout(10000),
+          });
 
-        const text = await res.text();
-        if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
-        if (text.trim().length < 30) continue;
+          if (!res.ok) continue;
 
-        // Skip if it returned HTML instead of data
-        if (text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html')) continue;
+          const text = await res.text();
+          if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
+          if (text.trim().length < 30) continue;
 
-        const wert = this.extractValue(text);
-        if (!wert || wert <= 0) continue;
+          // For HTML responses, parse tables for BRW values
+          if (text.trimStart().startsWith('<!') || text.trimStart().startsWith('<html') || text.trimStart().startsWith('<HTML') || text.trimStart().startsWith('<META')) {
+            const result = this.parseHtmlTable(text);
+            if (result) return result;
+            continue;
+          }
 
+          const wert = this.extractValue(text);
+          if (!wert || wert <= 0) continue;
+
+          return {
+            wert,
+            stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || this.extractField(text, 'STAG') || 'aktuell',
+            nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || this.extractField(text, 'NUTA') || 'W',
+            entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || this.extractField(text, 'ENTW') || 'B',
+            zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || this.extractField(text, 'WNUM') || '',
+            gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || this.extractField(text, 'GENA') || '',
+            bundesland: 'Schleswig-Holstein',
+            quelle: 'VBORIS-SH',
+            lizenz: '© LVermGeo SH (Ansicht frei)',
+          };
+        } catch {
+          // Try next format
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Parse an HTML GetFeatureInfo response to extract BRW value.
+   * Many GDI-DE WMS services return HTML tables with feature attributes.
+   */
+  private parseHtmlTable(html: string): NormalizedBRW | null {
+    // Strategy 1: Find BRW in <td> cells by looking for patterns like:
+    // <th>BRW</th><td>450</td> or <td>BRW</td><td>450</td>
+    // Also match: Bodenrichtwert, brwkon
+    const brwPatterns = [
+      /(?:BRW|Bodenrichtwert|brwkon)[^<]*<\/t[dh]>\s*<td[^>]*>\s*([\d.,]+)/gi,
+      /BRW[^"]*"[^"]*"[^>]*>\s*([\d.,]+)/gi,
+    ];
+
+    for (const pattern of brwPatterns) {
+      const match = pattern.exec(html);
+      if (match) {
+        let numStr = match[1].trim();
+        if (numStr.includes(',')) numStr = numStr.replace(/\./g, '').replace(',', '.');
+        const wert = parseFloat(numStr);
+        if (wert > 0 && wert <= 500_000) {
+          return {
+            wert,
+            stichtag: this.extractHtmlField(html, ['Stichtag', 'STAG', 'stag', 'stichtag']) || 'aktuell',
+            nutzungsart: this.extractHtmlField(html, ['Nutzungsart', 'NUTA', 'nuta', 'nutzungsart']) || 'unbekannt',
+            entwicklungszustand: this.extractHtmlField(html, ['Entwicklungszustand', 'ENTW', 'entw']) || 'B',
+            zone: this.extractHtmlField(html, ['Zone', 'WNUM', 'wnum', 'Bodenrichtwertnummer']) || '',
+            gemeinde: this.extractHtmlField(html, ['Gemeinde', 'GENA', 'gena', 'Gemeindename']) || '',
+            bundesland: 'Schleswig-Holstein',
+            quelle: 'VBORIS-SH',
+            lizenz: '© LVermGeo SH (Ansicht frei)',
+          };
+        }
+      }
+    }
+
+    // Strategy 2: Look for numeric values in table cells after stripping tags
+    // Some tables have the value directly as EUR/m² text
+    const eurMatch = html.match(/([\d.,]+)\s*(?:EUR\/m|€\/m)/i);
+    if (eurMatch) {
+      let numStr = eurMatch[1].trim();
+      if (numStr.includes(',')) numStr = numStr.replace(/\./g, '').replace(',', '.');
+      const wert = parseFloat(numStr);
+      if (wert > 0 && wert <= 500_000) {
         return {
           wert,
-          stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || this.extractField(text, 'STAG') || 'aktuell',
-          nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || this.extractField(text, 'NUTA') || 'W',
-          entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || this.extractField(text, 'ENTW') || 'B',
-          zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || this.extractField(text, 'WNUM') || '',
-          gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || this.extractField(text, 'GENA') || '',
+          stichtag: 'aktuell',
+          nutzungsart: 'unbekannt',
+          entwicklungszustand: 'B',
+          zone: '',
+          gemeinde: '',
           bundesland: 'Schleswig-Holstein',
           quelle: 'VBORIS-SH',
           lizenz: '© LVermGeo SH (Ansicht frei)',
         };
-      } catch {
-        // Try next format
+      }
+    }
+
+    return null;
+  }
+
+  private extractHtmlField(html: string, fieldNames: string[]): string | null {
+    for (const name of fieldNames) {
+      // Match: <th>FieldName</th><td>Value</td> or <td>FieldName</td><td>Value</td>
+      const re = new RegExp(`${name}[^<]*<\\/t[dh]>\\s*<td[^>]*>\\s*([^<]+)`, 'i');
+      const match = html.match(re);
+      if (match) {
+        const val = match[1].trim();
+        if (val.length > 0 && val !== '---' && val !== '-') return val;
       }
     }
     return null;
@@ -186,16 +295,19 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
 
   private extractValue(text: string): number | null {
     const patterns = [
-      // text/plain key=value: BRW = '450' or BRW = 450
+      // text/plain key=value: BRW = '450' or brwkon = '0.35'
       /^\s*BRW\s*=\s*'?([\d.,]+)'?/im,
+      /^\s*brwkon\s*=\s*'?([\d.,]+)'?/im,
       /^\s*BODENRICHTWERT(?:_TEXT|_LABEL)?\s*=\s*'?([\d.,]+)'?/im,
       // XML element
       /<(?:[a-zA-Z]+:)?BRW(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
+      /<(?:[a-zA-Z]+:)?brwkon(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
       /<(?:[a-zA-Z]+:)?bodenrichtwert(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
       // XML attribute
       /\bBRW="(\d+(?:[.,]\d+)?)"/i,
+      /\bbrwkon="(\d+(?:[.,]\d+)?)"/i,
       // JSON field
-      /"(?:BRW|brw|bodenrichtwert)"\s*:\s*([\d.]+)/i,
+      /"(?:BRW|brw|bodenrichtwert|brwkon)"\s*:\s*([\d.]+)/i,
       // EUR/m²
       /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m|€\/m)/i,
     ];
