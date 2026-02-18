@@ -13,43 +13,50 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
   isFallback = false;
 
   private wfsUrl = 'https://geodienste.hamburg.de/HH_WFS_Bodenrichtwerte';
+  private uekWfsUrl = 'https://geodienste.hamburg.de/HH_WFS_UEKnormierteBodenrichtwerte';
+  private uekWmsUrl = 'https://geodienste.hamburg.de/HH_WMS_UEKnormierteBodenrichtwerte';
   private discoveredTypeName: string | null = null;
 
   // Known type names for Hamburg VBORIS WFS (tried in order if discovery fails).
-  // Hamburg's Urban Data Platform uses the "de.hh.up:" namespace prefix.
   private readonly fallbackTypeNames = [
-    // Hamburg Urban Data Platform prefix (most likely)
-    'de.hh.up:Bodenrichtwert_Zonal',
-    'de.hh.up:Bodenrichtwert_Lagetypisch',
-    'de.hh.up:Bodenrichtwert_aktuell',
-    'de.hh.up:bodenrichtwert',
-    'de.hh.up:bodenrichtwerte',
-    // Generic app: prefix
-    'app:Bodenrichtwert_Zonal',
-    'app:bodenrichtwert_zonal',
-    'app:Bodenrichtwert',
-    'app:bodenrichtwert',
-    // Service-namespaced
-    'HH_WFS_Bodenrichtwerte:Bodenrichtwert_Zonal',
-    'brw:Bodenrichtwert',
-    'Bodenrichtwert_Zonal',
-    'Bodenrichtwert',
+    'app:lgv_brw_zoniert_alle',
+    'app:lgv_brw_zonen_2017',
+    'app:lgv_brw_zonen_2016',
   ];
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
     try {
-      // Discover WFS type names
-      const typeNames = await this.getTypeNames();
+      const bboxStrategies = this.buildBboxStrategies(lat, lon);
 
-      // Try WFS with multiple bbox strategies (axis order varies between deegree implementations)
+      // 1. Try main WFS endpoint with discovered type names
+      const typeNames = await this.getTypeNames();
       for (const typeName of typeNames) {
-        for (const bboxStrategy of this.buildBboxStrategies(lat, lon)) {
-          const result = await this.tryWfsGml(typeName, bboxStrategy);
+        for (const strategy of bboxStrategies) {
+          const result = await this.tryWfsGml(typeName, strategy);
           if (result) return result;
         }
       }
 
-      // WMS GetFeatureInfo fallback – the WMS has different layer names
+      // 2. Try UEK (normierte Bodenrichtwerte) WFS endpoint
+      //    This has simplified overview data with types like lgv_brw_uek_efh, lgv_brw_uek_mfh
+      const uekTypes = [
+        'app:lgv_brw_uek_mfh',  // multi-family (most common in cities)
+        'app:lgv_brw_uek_efh',  // single-family
+        'app:lgv_brw_uek_gh',   // commercial/shops
+        'app:lgv_brw_uek_bh',   // office buildings
+      ];
+      for (const typeName of uekTypes) {
+        for (const strategy of bboxStrategies) {
+          const result = await this.tryWfsGml(typeName, strategy, this.uekWfsUrl);
+          if (result) return result;
+        }
+      }
+
+      // 3. Try UEK WMS GetFeatureInfo (normalized overview, current data)
+      const uekResult = await this.tryWmsQuery(lat, lon, this.uekWmsUrl);
+      if (uekResult) return uekResult;
+
+      // 4. Try regular WMS GetFeatureInfo (may only have historical data)
       return await this.tryWmsQuery(lat, lon);
     } catch (err) {
       console.error('HH adapter error:', err);
@@ -133,20 +140,27 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
 
   private async tryWfsGml(
     typeName: string,
-    strategy: { bbox: string; version: string; typeParam: string }
+    strategy: { bbox: string; version: string; typeParam: string },
+    wfsBaseUrl?: string,
   ): Promise<NormalizedBRW | null> {
     try {
+      // Extract CRS from bbox suffix for srsName parameter
+      const bboxParts = strategy.bbox.split(',');
+      const crs = bboxParts.length > 4 ? bboxParts[4] : 'urn:ogc:def:crs:EPSG::25832';
+
       const params = new URLSearchParams({
         service: 'WFS',
         version: strategy.version,
         request: 'GetFeature',
         [strategy.typeParam]: typeName,
         bbox: strategy.bbox,
+        srsName: crs,
         count: '5',
         maxFeatures: '5',
       });
 
-      const url = `${this.wfsUrl}?${params}`;
+      const base = wfsBaseUrl || this.wfsUrl;
+      const url = `${base}?${params}`;
       const res = await fetch(url, {
         headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
         signal: AbortSignal.timeout(8000),
@@ -158,9 +172,10 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
       if (xml.includes('ExceptionReport') || xml.includes('ServiceException')) return null;
       if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
 
-      const wert = this.extractGmlValue(xml, ['BRW', 'brw', 'bodenrichtwert', 'brwkon']);
+      const wert = this.extractGmlValue(xml, ['BRW', 'brw', 'bodenrichtwert', 'brwkon', 'WERT', 'wert']);
       if (!wert || wert <= 0 || wert > 500000) return null;
 
+      this.discoveredTypeName = typeName;
       return {
         wert,
         stichtag: this.extractGmlField(xml, ['STAG', 'stag', 'STICHTAG', 'stichtag']) || 'unbekannt',
@@ -169,7 +184,7 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
         zone: this.extractGmlField(xml, ['BRZNAME', 'WNUM', 'brw_zone', 'wnum']) || '',
         gemeinde: this.extractGmlField(xml, ['GENA', 'ORTST', 'gemeinde', 'gena', 'ortst']) || 'Hamburg',
         bundesland: 'Hamburg',
-        quelle: 'BORIS-HH',
+        quelle: wfsBaseUrl?.includes('UEK') ? 'BORIS-HH (UEK)' : 'BORIS-HH',
         lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
       };
     } catch {
@@ -181,8 +196,8 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
    * WMS GetFeatureInfo fallback.
    * Hamburg also has a WMS endpoint with different layer names.
    */
-  private async tryWmsQuery(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    const wmsUrl = this.wfsUrl.replace('WFS', 'WMS');
+  private async tryWmsQuery(lat: number, lon: number, customWmsUrl?: string): Promise<NormalizedBRW | null> {
+    const wmsUrl = customWmsUrl || this.wfsUrl.replace('WFS', 'WMS');
     const delta = 0.001;
     const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
@@ -203,13 +218,13 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
         const allLayers = [...capXml.matchAll(/<Name>([^<]+)<\/Name>/gi)]
           .map(m => m[1].trim())
           .filter(n => n.length > 0 && n.length < 120);
-        // Prefer brw_zoniert layers, then any brw_ layer
+        // Prefer brw_uek or brw_zoniert layers, then any brw_ layer
         wmsLayers = allLayers.filter(n =>
-          n.includes('brw_zoniert') || n.includes('brw_zonal')
+          n.includes('brw_uek') || n.includes('brw_zoniert') || n.includes('brw_zonal')
         );
         if (!wmsLayers.length) {
           wmsLayers = allLayers.filter(n =>
-            n.includes('brw') && !n.includes('referenz') && !n.includes('beschriftung')
+            n.includes('brw') && !n.includes('referenz') && !n.includes('beschriftung') && !n.includes('lagetypisch')
           );
         }
         if (wmsLayers.length > 0) {
@@ -226,7 +241,7 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
     }
 
     for (const layer of wmsLayers) {
-      for (const fmt of ['text/xml', 'application/json', 'text/plain']) {
+      for (const fmt of ['text/plain', 'application/vnd.ogc.gml', 'text/xml', 'application/json']) {
         try {
           const params = new URLSearchParams({
             SERVICE: 'WMS',
