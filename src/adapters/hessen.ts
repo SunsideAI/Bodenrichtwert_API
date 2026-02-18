@@ -16,6 +16,9 @@ export class HessenAdapter implements BodenrichtwertAdapter {
 
   private wfsUrl = 'https://www.gds.hessen.de/wfs2/boris/cgi-bin/brw/2024/wfs';
 
+  // Max realistic BRW in Germany (even for best Munich/Frankfurt commercial)
+  private readonly MAX_BRW = 500_000;
+
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
     // Versuche zuerst JSON, dann GML
     try {
@@ -66,23 +69,28 @@ export class HessenAdapter implements BodenrichtwertAdapter {
     // Wohnbau-BRW bevorzugen
     const wohn = json.features.find(
       (f: any) => {
-        const nutzung = f.properties?.nutzungsart || f.properties?.NUTZUNG || '';
+        const nutzung = f.properties?.nutzungsart || f.properties?.NUTZUNG || f.properties?.nuta || '';
         return nutzung.startsWith('W') || nutzung.toLowerCase().includes('wohn');
       }
     ) || json.features[0];
 
     const p = wohn.properties;
 
-    const wert = parseFloat(String(p.bodenrichtwert || p.brw || p.BRW || p.wert || 0));
-    if (!wert || wert <= 0) return null;
+    // BRM 2.1.0: 'brw' is the monetary value field.
+    // 'bodenrichtwert' may be an object ID or zone reference – try it last.
+    const wert = this.pickValidWert([p.brw, p.BRW, p.wert, p.bodenrichtwert]);
+    if (!wert) {
+      console.error('HE JSON: Kein valider Wert. Properties:', JSON.stringify(p).slice(0, 500));
+      return null;
+    }
 
     return {
       wert,
-      stichtag: p.stichtag || p.STICHTAG || '2024-01-01',
-      nutzungsart: p.nutzungsart || p.NUTZUNG || 'unbekannt',
-      entwicklungszustand: p.entwicklungszustand || p.ENTW || 'B',
-      zone: p.zone || p.brw_zone || p.ZONE || '',
-      gemeinde: p.gemeinde || p.GEMEINDE || p.gemeinde_name || '',
+      stichtag: p.stichtag || p.stag || p.STICHTAG || '2024-01-01',
+      nutzungsart: p.nutzungsart || p.nuta || p.NUTZUNG || 'unbekannt',
+      entwicklungszustand: p.entwicklungszustand || p.entw || p.ENTW || 'B',
+      zone: p.zone || p.brw_zone || p.ZONE || p.wnum || '',
+      gemeinde: p.gemeinde || p.gena || p.GEMEINDE || '',
       bundesland: 'Hessen',
       quelle: 'BORIS-Hessen',
       lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
@@ -114,25 +122,37 @@ export class HessenAdapter implements BodenrichtwertAdapter {
     if (xml.includes('ExceptionReport') || xml.includes('ServiceException')) return null;
     if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
 
-    const wert = this.extractGmlValue(xml, ['bodenrichtwert', 'brw', 'BRW', 'wert']);
-    if (!wert || wert <= 0) return null;
+    // Match exact BRW/brw tag (not BRWZNR, BEZUGSWERT, etc.)
+    const wert = this.extractGmlValue(xml, ['brw', 'BRW', 'wert', 'bodenrichtwert']);
+    if (!wert) return null;
 
     return {
       wert,
-      stichtag: this.extractGmlField(xml, ['stichtag', 'STICHTAG']) || '2024-01-01',
-      nutzungsart: this.extractGmlField(xml, ['nutzungsart', 'NUTZUNG']) || 'unbekannt',
-      entwicklungszustand: this.extractGmlField(xml, ['entwicklungszustand', 'ENTW']) || 'B',
-      zone: this.extractGmlField(xml, ['zone', 'ZONE', 'brw_zone']) || '',
-      gemeinde: this.extractGmlField(xml, ['gemeinde', 'GEMEINDE', 'gemeinde_name']) || '',
+      stichtag: this.extractGmlField(xml, ['stichtag', 'stag', 'STICHTAG']) || '2024-01-01',
+      nutzungsart: this.extractGmlField(xml, ['nutzungsart', 'nuta', 'NUTZUNG']) || 'unbekannt',
+      entwicklungszustand: this.extractGmlField(xml, ['entwicklungszustand', 'entw', 'ENTW']) || 'B',
+      zone: this.extractGmlField(xml, ['zone', 'wnum', 'ZONE', 'brw_zone']) || '',
+      gemeinde: this.extractGmlField(xml, ['gemeinde', 'gena', 'GEMEINDE']) || '',
       bundesland: 'Hessen',
       quelle: 'BORIS-Hessen',
       lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
     };
   }
 
+  /** Try numeric candidates in order, return first in realistic BRW range */
+  private pickValidWert(candidates: any[]): number | null {
+    for (const c of candidates) {
+      if (c == null) continue;
+      const v = parseFloat(String(c));
+      if (v > 0 && v <= this.MAX_BRW && isFinite(v)) return v;
+    }
+    return null;
+  }
+
   private extractGmlValue(xml: string, fields: string[]): number | null {
     for (const field of fields) {
-      const re = new RegExp(`<[^>]*:?${field}[^>]*>([\\d.,]+)<`, 'i');
+      // Exact tag match: <brw> or <ns:brw> but NOT <brwznr> or <bezugswert>
+      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([\\d.,]+)<`, 'i');
       const match = xml.match(re);
       if (match) {
         let numStr = match[1];
@@ -141,7 +161,7 @@ export class HessenAdapter implements BodenrichtwertAdapter {
           numStr = numStr.replace(/\./g, '').replace(',', '.');
         }
         const val = parseFloat(numStr);
-        if (val > 0 && isFinite(val)) return val;
+        if (val > 0 && val <= this.MAX_BRW && isFinite(val)) return val;
       }
     }
     return null;
@@ -149,7 +169,7 @@ export class HessenAdapter implements BodenrichtwertAdapter {
 
   private extractGmlField(xml: string, fields: string[]): string | null {
     for (const field of fields) {
-      const re = new RegExp(`<[^>]*:?${field}[^>]*>([^<]+)<`, 'i');
+      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([^<]+)<`, 'i');
       const match = xml.match(re);
       if (match) return match[1].trim();
     }

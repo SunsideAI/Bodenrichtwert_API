@@ -19,7 +19,8 @@ export class BrandenburgAdapter implements BodenrichtwertAdapter {
       const delta = 0.0005;
       const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
-      const url = `${this.baseUrl}?bbox=${bbox}&f=json&limit=5`;
+      // Request more results so we can filter for most recent year
+      const url = `${this.baseUrl}?bbox=${bbox}&f=json&limit=20`;
 
       const res = await fetch(url, {
         headers: {
@@ -38,26 +39,64 @@ export class BrandenburgAdapter implements BodenrichtwertAdapter {
 
       if (!json.features?.length) return null;
 
-      // Wohnbau-BRW bevorzugen (BRM 3.0.1: nutzung.art enthält z.B. "Wohnbaufläche (W)")
-      const wohn = json.features.find(
-        (f: any) => {
-          const art = f.properties?.nutzung?.art || f.properties?.nutzungsart || '';
-          return art.includes('Wohn') || art.includes('(W)') || art.includes('(WA)') || art.includes('(WR)') || art.startsWith('W');
-        }
-      ) || json.features[0];
+      // Sort by stichtag descending to prefer the most recent data
+      const sorted = [...json.features].sort((a: any, b: any) => {
+        const da = new Date(a.properties?.stichtag || '2000-01-01').getTime();
+        const db = new Date(b.properties?.stichtag || '2000-01-01').getTime();
+        return db - da;
+      });
+
+      // Only keep entries from the last 5 years if possible
+      const currentYear = new Date().getFullYear();
+      const recent = sorted.filter((f: any) => {
+        const stichtag = f.properties?.stichtag || '';
+        const year = parseInt(stichtag.substring(0, 4)) || 0;
+        return year >= currentYear - 5;
+      });
+
+      const candidates = recent.length > 0 ? recent : sorted;
+
+      // Prefer Wohnbau
+      const wohn = candidates.find((f: any) => {
+        const art = f.properties?.nutzung?.art || f.properties?.nutzungsart || '';
+        return art.includes('Wohn') || art.includes('(W)') || art.includes('(WA)') || art.includes('(WR)') || art.startsWith('W');
+      }) || candidates[0];
 
       const p = wohn.properties;
 
-      const wert = p.bodenrichtwert || p.brw || 0;
-      if (!wert || wert <= 0) return null;
+      // BRM 3.0.1 may use different field names – try known variants in priority order
+      const wertCandidates = [
+        p.bodenrichtwert,
+        p.brw,
+        p.BRW,
+        p.richtwert,
+        p.wert,
+        p.betrag,
+      ];
+      let wert = 0;
+      for (const c of wertCandidates) {
+        const v = parseFloat(String(c ?? ''));
+        if (v > 0 && v <= 500000 && isFinite(v)) {
+          wert = v;
+          break;
+        }
+      }
 
-      // BRM 3.0.1: entwicklungszustand kann "Baureifes Land (B)" sein → Kurzcode extrahieren
+      if (!wert) {
+        console.error('BB: Kein valider Wert gefunden. Properties:', JSON.stringify(p).slice(0, 500));
+        return null;
+      }
+
+      // BRM 3.0.1: entwicklungszustand can be "Baureifes Land (B)" – extract code
       const entwRaw = p.entwicklungszustand || 'B';
       const entwMatch = entwRaw.match(/\(([A-Z]+)\)/);
       const entwicklungszustand = entwMatch ? entwMatch[1] : entwRaw;
 
-      // Nutzungsart aus verschachteltem Feld
+      // Nutzungsart aus verschachteltem Feld oder flachem String
       const nutzungsart = p.nutzung?.art || p.nutzungsart || 'unbekannt';
+
+      // Gemeinde can be an object, array of objects, or plain string
+      const gemeinde = this.extractGemeinde(p.gemeinde);
 
       return {
         wert,
@@ -65,7 +104,7 @@ export class BrandenburgAdapter implements BodenrichtwertAdapter {
         nutzungsart,
         entwicklungszustand,
         zone: p.bodenrichtwertzoneName || p.zone || '',
-        gemeinde: p.gemeinde?.bezeichnung || p.gemeinde || '',
+        gemeinde,
         bundesland: 'Brandenburg',
         quelle: 'BORIS-BB',
         lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
@@ -74,6 +113,21 @@ export class BrandenburgAdapter implements BodenrichtwertAdapter {
       console.error('BB adapter error:', err);
       return null;
     }
+  }
+
+  private extractGemeinde(raw: any): string {
+    if (!raw) return '';
+    if (typeof raw === 'string') return raw;
+    if (Array.isArray(raw)) {
+      return raw.map((g: any) => {
+        if (typeof g === 'string') return g;
+        return g.bezeichnung || g.name || g.gemeindename || '';
+      }).filter(Boolean).join(', ');
+    }
+    if (typeof raw === 'object') {
+      return raw.bezeichnung || raw.name || raw.gemeindename || '';
+    }
+    return String(raw);
   }
 
   async healthCheck(): Promise<boolean> {
