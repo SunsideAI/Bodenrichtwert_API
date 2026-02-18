@@ -31,17 +31,16 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
   // Cached discovered WMS layer names
   private discoveredWmsLayers: string[] | null = null;
 
-  // VBORIS-style date-keyed layer candidates for MV
+  // MV WMS layer names discovered from GetCapabilities.
+  // The service has specific sub-layers: wohnbauflaeche, gemischte_bauflaeche, etc.
+  // The group layer 'bodenrichtwerte' returns ALL sub-layers.
+  // We prefer specific sub-layers (Wohnbau > Gemischt > Gewerbe > Sonder > group).
   private readonly wmsLayerCandidates = [
-    'vBODENRICHTWERTZONE_20240101',
-    'vBODENRICHTWERTZONE_20230101',
-    'vBODENRICHTWERTZONE_20220101',
-    'bodenrichtwert',
-    'Bodenrichtwert',
-    'bodenrichtwerte',
-    'BRW',
-    'brw',
-    '0',
+    'wohnbauflaeche',
+    'gemischte_bauflaeche',
+    'gewerbliche_bauflaeche',
+    'sonderbauflaeche',
+    'bodenrichtwerte',    // group layer (returns all sub-layers)
   ];
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
@@ -184,8 +183,8 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
     const delta = 0.001;
     const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
-    // Try text/plain first (avoids HTML-wrapped responses), then text/xml
-    for (const infoFormat of ['text/plain', 'text/xml']) {
+    // text/plain is best (structured key=value), then GML, then text/xml
+    for (const infoFormat of ['text/plain', 'application/vnd.ogc.gml', 'text/xml']) {
       try {
         const params = new URLSearchParams({
           SERVICE: 'WMS',
@@ -200,7 +199,7 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
           X: '50',
           Y: '50',
           INFO_FORMAT: infoFormat,
-          FEATURE_COUNT: '5',
+          FEATURE_COUNT: '10',
           STYLES: '',
           FORMAT: 'image/png',
         });
@@ -218,20 +217,10 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
         if (text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html')) continue;
         if (text.trim().length < 30) continue;
 
-        const wert = this.extractValue(text);
-        if (!wert || wert <= 0) continue;
-
-        return {
-          wert,
-          stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || this.extractField(text, 'STAG') || 'unbekannt',
-          nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || this.extractField(text, 'NUTA') || 'unbekannt',
-          entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || this.extractField(text, 'ENTW') || 'B',
-          zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || this.extractField(text, 'WNUM') || '',
-          gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || this.extractField(text, 'GENA') || '',
-          bundesland: 'Mecklenburg-Vorpommern',
-          quelle: 'BORIS-MV (WMS)',
-          lizenz: '© LAiV M-V',
-        };
+        // For group layer 'bodenrichtwerte', the response contains multiple Layer sections.
+        // Parse each section and prefer Wohnbau > Gemischt > Gewerbe > Sonder over Forst/Grünland.
+        const result = this.parseBestFeature(text, layer);
+        if (result) return result;
       } catch {
         // Try next format
       }
@@ -239,16 +228,94 @@ export class MecklenburgVorpommernAdapter implements BodenrichtwertAdapter {
     return null;
   }
 
+  /**
+   * Parse the best feature from a (possibly multi-layer) text/plain or GML response.
+   * MV uses VBORIS short-form fields: brwkon, stag, entw, nuta, gabe, ortst, class.
+   * For group layer, prefer building land over forest/agriculture.
+   */
+  private parseBestFeature(text: string, queriedLayer: string): NormalizedBRW | null {
+    // Split into layer sections for text/plain responses
+    const sections = text.split(/(?=Layer ')/);
+
+    // Priority order for sub-layer types
+    const layerPriority: Record<string, number> = {
+      'wohnbauflaeche': 1,
+      'gemischte_bauflaeche': 2,
+      'sonderbauflaeche': 3,
+      'gewerbliche_bauflaeche': 4,
+      'bebaute_flaeche_im_aussenbereich': 5,
+      'sanierungsgebiet': 6,
+      'sonstige_flaechen': 7,
+      'ackerland': 90,
+      'gruenland': 91,
+      'forst': 92,
+    };
+
+    let bestResult: NormalizedBRW | null = null;
+    let bestPriority = 999;
+
+    for (const section of sections) {
+      // Identify layer name from section header
+      const layerMatch = section.match(/Layer '([^']+)'/);
+      const sectionLayer = layerMatch ? layerMatch[1] : queriedLayer;
+      const priority = layerPriority[sectionLayer] ?? 50;
+
+      const wert = this.extractValue(section);
+      if (!wert || wert <= 0) continue;
+
+      // Skip very low values from forest/agriculture if we already have building land
+      if (wert < 1 && priority > 50) continue;
+
+      if (priority < bestPriority) {
+        bestPriority = priority;
+        bestResult = {
+          wert,
+          stichtag: this.extractField(section, 'stag') || this.extractField(section, 'stichtag') || this.extractField(section, 'STAG') || 'unbekannt',
+          nutzungsart: this.extractField(section, 'nuta') || this.extractField(section, 'nutzungsart') || this.extractField(section, 'NUTA') || this.extractField(section, 'class') || 'unbekannt',
+          entwicklungszustand: this.extractField(section, 'entw') || this.extractField(section, 'entwicklungszustand') || this.extractField(section, 'ENTW') || 'B',
+          zone: this.extractField(section, 'wnum') || this.extractField(section, 'zone') || this.extractField(section, 'WNUM') || '',
+          gemeinde: this.extractField(section, 'ortst') || this.extractField(section, 'gabe') || this.extractField(section, 'gemeinde') || this.extractField(section, 'GENA') || '',
+          bundesland: 'Mecklenburg-Vorpommern',
+          quelle: `BORIS-MV (WMS/${sectionLayer})`,
+          lizenz: '© LAiV M-V',
+        };
+      }
+    }
+
+    // If no sections found (non-text/plain or single-layer response), try whole text
+    if (!bestResult) {
+      const wert = this.extractValue(text);
+      if (wert && wert > 0) {
+        bestResult = {
+          wert,
+          stichtag: this.extractField(text, 'stag') || this.extractField(text, 'stichtag') || 'unbekannt',
+          nutzungsart: this.extractField(text, 'nuta') || this.extractField(text, 'nutzungsart') || this.extractField(text, 'class') || 'unbekannt',
+          entwicklungszustand: this.extractField(text, 'entw') || this.extractField(text, 'entwicklungszustand') || 'B',
+          zone: this.extractField(text, 'wnum') || this.extractField(text, 'zone') || '',
+          gemeinde: this.extractField(text, 'ortst') || this.extractField(text, 'gabe') || this.extractField(text, 'gemeinde') || '',
+          bundesland: 'Mecklenburg-Vorpommern',
+          quelle: 'BORIS-MV (WMS)',
+          lizenz: '© LAiV M-V',
+        };
+      }
+    }
+
+    return bestResult;
+  }
+
   private extractValue(text: string): number | null {
     const patterns: RegExp[] = [
-      // text/plain key=value format
+      // text/plain key=value format (MV uses brwkon as field name)
+      /^\s*brwkon\s*=\s*'?([\d.,]+)'?/im,
       /^\s*BRW\s*=\s*'?([\d.,]+)'?/im,
       /^\s*BODENRICHTWERT(?:_TEXT|_LABEL)?\s*=\s*'?([\d.,]+)'?/im,
       // XML elements (allow attributes in opening tag)
+      /<(?:[a-zA-Z]+:)?brwkon(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
       /<(?:[a-zA-Z]+:)?BRW(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
       /<(?:[a-zA-Z]+:)?bodenrichtwert(?:\s[^>]*)?>(\d+(?:[.,]\d+)?)</i,
       // XML attribute
       /\bBRW="(\d+(?:[.,]\d+)?)"/i,
+      /\bbrwkon="(\d+(?:[.,]\d+)?)"/i,
       // EUR/m² unit marker
       /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m|€\/m)/i,
     ];
