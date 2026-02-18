@@ -29,6 +29,22 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   private discoveredUrl: string | null = null;
 
   /**
+   * Get appropriate HTTP headers for the given WMS URL.
+   * The _DANORD endpoints require Referer-based authentication
+   * (used by the official DANord VBORIS viewer).
+   */
+  private getHeaders(wmsUrl: string): Record<string, string> {
+    if (wmsUrl.includes('_DANORD')) {
+      return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://danord.gdi-sh.de/viewer/resources/apps/VBORIS/index.html',
+        'Origin': 'https://danord.gdi-sh.de',
+      };
+    }
+    return { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' };
+  }
+
+  /**
    * Convert WGS84 lat/lon to UTM Zone 32N (EPSG:25832).
    * Standard Transverse Mercator projection formulas.
    */
@@ -122,7 +138,7 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
           });
 
           const res = await fetch(`${baseUrl}?${params}`, {
-            headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+            headers: this.getHeaders(baseUrl),
             signal: AbortSignal.timeout(8000),
           });
 
@@ -244,7 +260,7 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
 
           const url = `${wmsUrl}?${params}`;
           const res = await fetch(url, {
-            headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+            headers: this.getHeaders(wmsUrl),
             signal: AbortSignal.timeout(10000),
           });
 
@@ -289,59 +305,94 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
    * Many GDI-DE WMS services return HTML tables with feature attributes.
    */
   private parseHtmlTable(html: string): NormalizedBRW | null {
-    // Strategy 1: Find BRW in <td> cells by looking for patterns like:
-    // <th>BRW</th><td>450</td> or <td>BRW</td><td>450</td>
-    // Also match: Bodenrichtwert, brwkon
+    // Strategy 1: Esri ArcGIS-specific HTML format
+    // Esri uses styled elements like <div id="TextBRW"> or rows with #TextBRW CSS.
+    // Also look for BRW/brw values in any <span>, <div>, <td> elements.
     const brwPatterns = [
+      // Esri-styled: element with id containing BRW, value nearby
+      /id="[^"]*BRW[^"]*"[^>]*>[\s\S]*?([\d.,]+)\s*(?:EUR|€|\/m)/gi,
+      // BRW label followed by value in next element
+      /(?:BRW|Bodenrichtwert|brwkon)[^<]*<\/[^>]+>\s*<[^>]+>\s*([\d.,]+)/gi,
+      // BRW in th/td followed by value in td
       /(?:BRW|Bodenrichtwert|brwkon)[^<]*<\/t[dh]>\s*<td[^>]*>\s*([\d.,]+)/gi,
-      /BRW[^"]*"[^"]*"[^>]*>\s*([\d.,]+)/gi,
+      // Bold/styled BRW value: <b>450</b> or <strong>450</strong> after BRW label
+      /BRW[^<]*<[^>]*>\s*<(?:b|strong)[^>]*>\s*([\d.,]+)/gi,
+      // Value in element with BRW-related class/id attribute
+      /(?:class|id)="[^"]*(?:brw|BRW|richtwert)[^"]*"[^>]*>\s*([\d.,]+)/gi,
     ];
 
     for (const pattern of brwPatterns) {
       const match = pattern.exec(html);
       if (match) {
-        let numStr = match[1].trim();
-        if (numStr.includes(',')) numStr = numStr.replace(/\./g, '').replace(',', '.');
-        const wert = parseFloat(numStr);
-        if (wert > 0 && wert <= 500_000) {
-          return {
-            wert,
-            stichtag: this.extractHtmlField(html, ['Stichtag', 'STAG', 'stag', 'stichtag']) || 'aktuell',
-            nutzungsart: this.extractHtmlField(html, ['Nutzungsart', 'NUTA', 'nuta', 'nutzungsart']) || 'unbekannt',
-            entwicklungszustand: this.extractHtmlField(html, ['Entwicklungszustand', 'ENTW', 'entw']) || 'B',
-            zone: this.extractHtmlField(html, ['Zone', 'WNUM', 'wnum', 'Bodenrichtwertnummer']) || '',
-            gemeinde: this.extractHtmlField(html, ['Gemeinde', 'GENA', 'gena', 'Gemeindename']) || '',
-            bundesland: 'Schleswig-Holstein',
-            quelle: 'VBORIS-SH',
-            lizenz: '© LVermGeo SH (Ansicht frei)',
-          };
+        const wert = this.parseNumber(match[1]);
+        if (wert !== null) {
+          return this.buildResult(html, wert);
         }
       }
     }
 
-    // Strategy 2: Look for numeric values in table cells after stripping tags
-    // Some tables have the value directly as EUR/m² text
+    // Strategy 2: EUR/m² pattern anywhere in HTML
     const eurMatch = html.match(/([\d.,]+)\s*(?:EUR\/m|€\/m)/i);
     if (eurMatch) {
-      let numStr = eurMatch[1].trim();
-      if (numStr.includes(',')) numStr = numStr.replace(/\./g, '').replace(',', '.');
-      const wert = parseFloat(numStr);
-      if (wert > 0 && wert <= 500_000) {
-        return {
-          wert,
-          stichtag: 'aktuell',
-          nutzungsart: 'unbekannt',
-          entwicklungszustand: 'B',
-          zone: '',
-          gemeinde: '',
-          bundesland: 'Schleswig-Holstein',
-          quelle: 'VBORIS-SH',
-          lizenz: '© LVermGeo SH (Ansicht frei)',
-        };
+      const wert = this.parseNumber(eurMatch[1]);
+      if (wert !== null) {
+        return this.buildResult(html, wert);
+      }
+    }
+
+    // Strategy 3: Esri HTML often has all field values in a simple key-value table.
+    // Look for any numeric value > 1 that appears after common BRW-related German labels.
+    const germanBrwPatterns = [
+      /Richtwert[^<]*<\/[^>]+>\s*<[^>]+>\s*([\d.,]+)/gi,
+      /Bodenwert[^<]*<\/[^>]+>\s*<[^>]+>\s*([\d.,]+)/gi,
+      /Wert[^<]*<\/[^>]+>\s*<[^>]+>\s*([\d.,]+)/gi,
+    ];
+    for (const pattern of germanBrwPatterns) {
+      const match = pattern.exec(html);
+      if (match) {
+        const wert = this.parseNumber(match[1]);
+        if (wert !== null && wert >= 5) {
+          return this.buildResult(html, wert);
+        }
+      }
+    }
+
+    // Strategy 4: Broad scan — find standalone numbers in table cells that look like BRW values
+    // Esri HTML may just have numbers without labels in styled divs
+    const allNumbers = [...html.matchAll(/>(\d{2,6}(?:[.,]\d{1,2})?)\s*<\//g)];
+    for (const m of allNumbers) {
+      const wert = this.parseNumber(m[1]);
+      if (wert !== null && wert >= 5 && wert <= 50000) {
+        // Only use this if the HTML contains BRW-related keywords
+        if (/(?:BRW|Bodenrichtwert|Richtwert|VBORIS|TextBRW)/i.test(html)) {
+          return this.buildResult(html, wert);
+        }
       }
     }
 
     return null;
+  }
+
+  private parseNumber(numStr: string): number | null {
+    numStr = numStr.trim();
+    if (numStr.includes(',')) numStr = numStr.replace(/\./g, '').replace(',', '.');
+    const val = parseFloat(numStr);
+    if (val > 0 && val <= 500_000 && isFinite(val)) return val;
+    return null;
+  }
+
+  private buildResult(html: string, wert: number): NormalizedBRW {
+    return {
+      wert,
+      stichtag: this.extractHtmlField(html, ['Stichtag', 'STAG', 'stag', 'stichtag', 'Stichtagsdatum']) || 'aktuell',
+      nutzungsart: this.extractHtmlField(html, ['Nutzungsart', 'NUTA', 'nuta', 'nutzungsart', 'Nutzung']) || 'unbekannt',
+      entwicklungszustand: this.extractHtmlField(html, ['Entwicklungszustand', 'ENTW', 'entw', 'Entwicklung']) || 'B',
+      zone: this.extractHtmlField(html, ['Zone', 'WNUM', 'wnum', 'Bodenrichtwertnummer', 'Zonennummer']) || '',
+      gemeinde: this.extractHtmlField(html, ['Gemeinde', 'GENA', 'gena', 'Gemeindename', 'Ort']) || '',
+      bundesland: 'Schleswig-Holstein',
+      quelle: 'VBORIS-SH',
+      lizenz: '© LVermGeo SH (Ansicht frei)',
+    };
   }
 
   private extractHtmlField(html: string, fieldNames: string[]): string | null {
@@ -351,6 +402,13 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
       const match = html.match(re);
       if (match) {
         const val = match[1].trim();
+        if (val.length > 0 && val !== '---' && val !== '-') return val;
+      }
+      // Esri: label and value in adjacent elements (div, span, etc.)
+      const re2 = new RegExp(`${name}[^<]*<\\/[^>]+>\\s*<[^>]+>\\s*([^<]+)`, 'i');
+      const match2 = html.match(re2);
+      if (match2) {
+        const val = match2[1].trim();
         if (val.length > 0 && val !== '---' && val !== '-') return val;
       }
     }
@@ -415,6 +473,7 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
           REQUEST: 'GetCapabilities',
         });
         const res = await fetch(`${url}?${params}`, {
+          headers: this.getHeaders(url),
           signal: AbortSignal.timeout(5000),
         });
         if (res.ok) return true;
