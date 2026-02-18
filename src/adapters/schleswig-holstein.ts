@@ -14,14 +14,15 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   stateCode = 'SH';
   isFallback = false;
 
-  // Multiple URL candidates for SH BRW WMS
-  // Note: service.gdi-sh.de backend was down; dienste.gdi-sh.de is the active alternative
+  // WMS URL candidates for SH BRW (prioritized by reliability)
+  // The _DANORD variant is the one used by the official DANord VBORIS viewer
+  // and is the only one that actually supports GetFeatureInfo/GetMap.
+  // The base WMS_SH_FD_VBORIS serves GetCapabilities but GetMap/GetFeatureInfo fail.
   private readonly wmsUrls = [
-    'https://dienste.gdi-sh.de/WMS_SH_FD_VBORIS',
+    'https://service.gdi-sh.de/WMS_SH_FD_VBORIS_DANORD',
+    'https://dienste.gdi-sh.de/WMS_SH_FD_VBORIS_DANORD',
     'https://service.gdi-sh.de/WMS_SH_FD_VBORIS',
-    'https://service.gdi-sh.de/WMS_SH_BORIS',
-    'https://gdi.schleswig-holstein.de/WMS_SH_FD_VBORIS',
-    'https://sh-mis.schleswig-holstein.de/geoserver/vboris/wms',
+    'https://dienste.gdi-sh.de/WMS_SH_FD_VBORIS',
   ];
 
   private discoveredLayers: string[] | null = null;
@@ -84,37 +85,23 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   ];
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    // Discover actual layers via GetCapabilities
-    if (!this.discoveredUrl) {
+    // Discover actual layers via GetCapabilities (any URL works for this)
+    if (!this.discoveredLayers) {
       await this.discoverService();
     }
 
-    const urlsToTry = this.discoveredUrl ? [this.discoveredUrl] : this.wmsUrls;
-    // Limit layers to avoid excessive requests (each layer tries multiple versions × formats)
     const allLayers = this.discoveredLayers?.length ? this.discoveredLayers : this.layerCandidates;
-    const layersToTry = allLayers.slice(0, 8);
+    const layersToTry = allLayers.slice(0, 6);
 
-    for (const wmsUrl of urlsToTry) {
+    // Always try all WMS URLs for queries (discovery URL may differ from working query URL).
+    // The _DANORD URLs are first in the list and are the ones that actually work.
+    for (const wmsUrl of this.wmsUrls) {
       for (const layer of layersToTry) {
         try {
           const result = await this.queryWms(lat, lon, wmsUrl, layer);
           if (result) return result;
         } catch {
           // Try next layer
-        }
-      }
-    }
-
-    // Fallback: try all URLs × all candidates
-    if (this.discoveredUrl) {
-      for (const wmsUrl of this.wmsUrls) {
-        for (const layer of this.layerCandidates) {
-          try {
-            const result = await this.queryWms(lat, lon, wmsUrl, layer);
-            if (result) return result;
-          } catch {
-            // Continue
-          }
         }
       }
     }
