@@ -2,8 +2,9 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
 /**
  * Brandenburg Adapter
  *
- * Nutzt die moderne OGC API Features (OpenAPI 3.0) von geobasis-bb.de.
- * Best Practice Referenz – neues Datenmodell seit 2025.
+ * Nutzt die OGC API Features von geobasis-bb.de.
+ * Collection: br_bodenrichtwert (BRM 3.0.1 Datenmodell)
+ * Felder sind teilweise verschachtelt (nutzung.art, gemeinde.bezeichnung).
  */
 export declare class BrandenburgAdapter implements BodenrichtwertAdapter {
     state: string;

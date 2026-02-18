@@ -1,14 +1,15 @@
 /**
  * Brandenburg Adapter
  *
- * Nutzt die moderne OGC API Features (OpenAPI 3.0) von geobasis-bb.de.
- * Best Practice Referenz – neues Datenmodell seit 2025.
+ * Nutzt die OGC API Features von geobasis-bb.de.
+ * Collection: br_bodenrichtwert (BRM 3.0.1 Datenmodell)
+ * Felder sind teilweise verschachtelt (nutzung.art, gemeinde.bezeichnung).
  */
 export class BrandenburgAdapter {
     state = 'Brandenburg';
     stateCode = 'BB';
     isFallback = false;
-    baseUrl = 'https://ogc-api.geobasis-bb.de/boris/v1/collections/bodenrichtwert/items';
+    baseUrl = 'https://ogc-api.geobasis-bb.de/boris/collections/br_bodenrichtwert/items';
     async getBodenrichtwert(lat, lon) {
         try {
             const delta = 0.0005;
@@ -28,21 +29,31 @@ export class BrandenburgAdapter {
             const json = await res.json();
             if (!json.features?.length)
                 return null;
+            // Wohnbau-BRW bevorzugen (BRM 3.0.1: nutzung.art enthält z.B. "Wohnbaufläche (W)")
             const wohn = json.features.find((f) => {
-                const nutzung = f.properties?.nutzungsart || '';
-                return nutzung.startsWith('W') || nutzung.toLowerCase().includes('wohn');
+                const art = f.properties?.nutzung?.art || f.properties?.nutzungsart || '';
+                return art.includes('Wohn') || art.includes('(W)') || art.includes('(WA)') || art.includes('(WR)') || art.startsWith('W');
             }) || json.features[0];
             const p = wohn.properties;
+            const wert = p.bodenrichtwert || p.brw || 0;
+            if (!wert || wert <= 0)
+                return null;
+            // BRM 3.0.1: entwicklungszustand kann "Baureifes Land (B)" sein → Kurzcode extrahieren
+            const entwRaw = p.entwicklungszustand || 'B';
+            const entwMatch = entwRaw.match(/\(([A-Z]+)\)/);
+            const entwicklungszustand = entwMatch ? entwMatch[1] : entwRaw;
+            // Nutzungsart aus verschachteltem Feld
+            const nutzungsart = p.nutzung?.art || p.nutzungsart || 'unbekannt';
             return {
-                wert: p.bodenrichtwert || p.brw || 0,
+                wert,
                 stichtag: p.stichtag || 'unbekannt',
-                nutzungsart: p.nutzungsart || 'unbekannt',
-                entwicklungszustand: p.entwicklungszustand || 'B',
-                zone: p.zone || p.brw_zone || '',
-                gemeinde: p.gemeinde || p.ort || '',
+                nutzungsart,
+                entwicklungszustand,
+                zone: p.bodenrichtwertzoneName || p.zone || '',
+                gemeinde: p.gemeinde?.bezeichnung || p.gemeinde || '',
                 bundesland: 'Brandenburg',
                 quelle: 'BORIS-BB',
-                lizenz: '© LGB Brandenburg',
+                lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
             };
         }
         catch (err) {

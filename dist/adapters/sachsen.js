@@ -2,8 +2,8 @@
  * Sachsen Adapter
  *
  * Nutzt den WMS GetFeatureInfo Endpunkt (kein WFS verfügbar).
- * Daten: Bodenrichtwerte (jahresspezifischer Dienst)
- * CRS: EPSG:25833 (UTM Zone 33N)
+ * URL: landesvermessung.sachsen.de mit cfg-Parameter für Jahrgang.
+ * CRS: EPSG:25833 (nativ), BBOX in EPSG:4326 (WMS 1.1.1)
  * Lizenz: Erlaubnis- und gebührenfrei
  */
 export class SachsenAdapter {
@@ -11,11 +11,11 @@ export class SachsenAdapter {
     stateCode = 'SN';
     isFallback = false;
     wmsUrl = 'https://www.landesvermessung.sachsen.de/fp/http-proxy/svc';
-    // Mögliche Layer-Namen – variiert je nach Dienst-Konfiguration
-    layerCandidates = ['brw_zonen', 'Bauland', 'BRW', 'bodenrichtwerte', '0'];
+    // Reduzierte Layer-Kandidaten (häufigste zuerst)
+    layerCandidates = ['brw_zonen', 'Bauland', 'BRW', '0'];
     async getBodenrichtwert(lat, lon) {
-        // Versuche aktuellstes Jahr zuerst, dann Fallback
-        for (const year of ['2024', '2023', '2022']) {
+        // Nur aktuellstes Jahr versuchen, dann ein Fallback-Jahr
+        for (const year of ['2024', '2023']) {
             for (const layer of this.layerCandidates) {
                 try {
                     const result = await this.queryWms(lat, lon, year, layer);
@@ -27,7 +27,6 @@ export class SachsenAdapter {
                 }
             }
         }
-        console.error('SN adapter: Kein Treffer mit allen Jahr/Layer-Kombinationen');
         return null;
     }
     async queryWms(lat, lon, year, layer) {
@@ -59,8 +58,10 @@ export class SachsenAdapter {
         if (!res.ok)
             return null;
         const text = await res.text();
-        // Fehler/leere Antworten ignorieren
         if (text.includes('ServiceException') || text.includes('ExceptionReport'))
+            return null;
+        // Leere Antwort oder sehr kurzer Text → kein Treffer
+        if (text.length < 50)
             return null;
         const wert = this.extractValue(text);
         if (!wert || wert <= 0)
@@ -86,8 +87,13 @@ export class SachsenAdapter {
         for (const pattern of patterns) {
             const match = text.match(pattern);
             if (match) {
-                const val = parseFloat(match[1].replace(',', '.'));
-                if (val > 0)
+                let numStr = match[1];
+                // Deutsche Zahlenformat: 1.250,50 → 1250.50
+                if (numStr.includes(',')) {
+                    numStr = numStr.replace(/\./g, '').replace(',', '.');
+                }
+                const val = parseFloat(numStr);
+                if (val > 0 && isFinite(val))
                     return val;
             }
         }
@@ -101,7 +107,7 @@ export class SachsenAdapter {
     async healthCheck() {
         try {
             const params = new URLSearchParams({
-                cfg: 'boris_2023',
+                cfg: 'boris_2024',
                 SERVICE: 'WMS',
                 VERSION: '1.1.1',
                 REQUEST: 'GetCapabilities',

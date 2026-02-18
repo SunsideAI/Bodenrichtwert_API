@@ -49,8 +49,11 @@ export class BerlinAdapter {
                 return nutzung.startsWith('W') || nutzung.toLowerCase().includes('wohn');
             }) || json.features[0];
             const p = wohn.properties;
+            const wert = parseFloat(String(p.BRW || p.brw || p.bodenrichtwert || p.BODENRICHTWERT || 0));
+            if (!wert || wert <= 0)
+                return null;
             return {
-                wert: p.BRW || p.brw || p.bodenrichtwert || p.BODENRICHTWERT || 0,
+                wert,
                 stichtag: p.STICHTAG || p.stichtag || '2024-01-01',
                 nutzungsart: p.NUTZUNG || p.nutzungsart || 'unbekannt',
                 entwicklungszustand: p.ENTW || p.entwicklungszustand || 'B',
@@ -113,8 +116,12 @@ export class BerlinAdapter {
             const re = new RegExp(`<[^>]*:?${field}[^>]*>([\\d.,]+)<`, 'i');
             const match = xml.match(re);
             if (match) {
-                const val = parseFloat(match[1].replace(',', '.'));
-                if (val > 0)
+                let numStr = match[1];
+                if (numStr.includes(',')) {
+                    numStr = numStr.replace(/\./g, '').replace(',', '.');
+                }
+                const val = parseFloat(numStr);
+                if (val > 0 && isFinite(val))
                     return val;
             }
         }
