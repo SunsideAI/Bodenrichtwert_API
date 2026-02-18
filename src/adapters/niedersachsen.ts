@@ -142,6 +142,13 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
     const json = JSON.parse(text);
     if (!json.features?.length) return null;
 
+    // Debug: Log property keys and first feature for diagnosis
+    const firstProps = json.features[0]?.properties;
+    if (firstProps) {
+      console.log(`NI JSON [${typeName}] keys:`, Object.keys(firstProps));
+      console.log(`NI JSON [${typeName}] first feature:`, JSON.stringify(firstProps).substring(0, 500));
+    }
+
     // Wohnbau-BRW bevorzugen
     const wohn = json.features.find(
       (f: any) => {
@@ -178,6 +185,9 @@ export class NiedersachsenAdapter implements BodenrichtwertAdapter {
 
     if (xml.includes('ExceptionReport') || xml.includes('ServiceException')) return null;
     if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
+
+    // Debug: Log truncated GML response for diagnosis
+    console.log(`NI GML [${typeName}] response (first 1000 chars):`, xml.substring(0, 1000));
 
     // BRW-Wert aus GML extrahieren
     const wert = this.extractGmlValue(xml, ['brw', 'BRW', 'bodenrichtwert', 'Bodenrichtwert', 'wert', 'richtwert']);
