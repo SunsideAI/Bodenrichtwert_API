@@ -204,7 +204,7 @@ export class NRWAdapter implements BodenrichtwertAdapter {
         zone: p.brw_zone || p.zone || p.lage || '',
         gemeinde: p.gemeinde || p.gemeinde_name || p.ort || '',
         bundesland: 'Nordrhein-Westfalen',
-        quelle: `BORIS-NRW (${layer})`,
+        quelle: 'BORIS-NRW',
         lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
       };
     } catch {
@@ -226,22 +226,29 @@ export class NRWAdapter implements BodenrichtwertAdapter {
       zone: this.extractFieldFromXml(xml, ['brw_zone', 'zone', 'lage']) || '',
       gemeinde: this.extractFieldFromXml(xml, ['gemeinde', 'Gemeinde', 'ort', 'name']) || '',
       bundesland: 'Nordrhein-Westfalen',
-      quelle: `BORIS-NRW (${layer})`,
+      quelle: 'BORIS-NRW',
       lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
     };
   }
 
   private parseHtmlResponse(html: string, layer: string): NormalizedBRW | null {
-    // EUR/m²-Wert aus HTML extrahieren
+    // HTML-Tags und CSS entfernen für Textsuche
+    const plainText = html
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ');
+
+    // EUR/m²-Wert aus HTML/Text extrahieren
     const patterns = [
       /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m²|€\/m²|EUR\/qm|€\/qm|EUR\/m&sup2;)/i,
-      /(?:Bodenrichtwert|BRW|Wert|Richtwert)[:\s]*(\d+(?:[.,]\d+)?)/i,
+      /(?:Bodenrichtwert|BRW|Richtwert)[:\s]*(\d+(?:[.,]\d+)?)/i,
       /(\d+(?:[.,]\d+)?)\s*(?:EUR|€)/i,
     ];
 
     let wert: number | null = null;
     for (const pattern of patterns) {
-      const match = html.match(pattern);
+      // Versuche in beiden Varianten (original HTML und stripped text)
+      const match = html.match(pattern) || plainText.match(pattern);
       if (match) {
         wert = parseFloat(match[1].replace(',', '.'));
         if (wert > 0) break;
@@ -250,19 +257,24 @@ export class NRWAdapter implements BodenrichtwertAdapter {
 
     if (!wert || wert <= 0) return null;
 
-    // Stichtag aus HTML
-    const stichtagMatch = html.match(/(?:Stichtag|stichtag)[:\s]*(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})/i);
-    const gemeindeMatch = html.match(/(?:Gemeinde|Stadt|Ort)[:\s]*([^<\n,]+)/i);
+    // Stichtag aus HTML/Text
+    const stichtagMatch = plainText.match(/(?:Stichtag|stichtag)[:\s]*(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})/i);
+
+    // Gemeinde aus reinem Text extrahieren (kein CSS-Müll)
+    const gemeindeMatch = plainText.match(/(?:Gemeinde|Gemeindename)[:\s]+([A-ZÄÖÜa-zäöüß][A-ZÄÖÜa-zäöüß\s\-]+)/);
+
+    // Nutzungsart
+    const nutzungsartMatch = plainText.match(/(?:Nutzungsart|nutzung)[:\s]*([A-Za-zÄÖÜäöü\s]+?)(?:\s{2,}|\s*$)/i);
 
     return {
       wert,
       stichtag: stichtagMatch ? stichtagMatch[1] : 'aktuell',
-      nutzungsart: 'unbekannt',
+      nutzungsart: nutzungsartMatch ? nutzungsartMatch[1].trim() : 'unbekannt',
       entwicklungszustand: 'B',
       zone: '',
       gemeinde: gemeindeMatch ? gemeindeMatch[1].trim() : '',
       bundesland: 'Nordrhein-Westfalen',
-      quelle: `BORIS-NRW (${layer})`,
+      quelle: 'BORIS-NRW',
       lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
     };
   }
