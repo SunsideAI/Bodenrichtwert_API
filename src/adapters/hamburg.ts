@@ -198,15 +198,16 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
    */
   private async tryWmsQuery(lat: number, lon: number, customWmsUrl?: string): Promise<NormalizedBRW | null> {
     const wmsUrl = customWmsUrl || this.wfsUrl.replace('WFS', 'WMS');
+    const { easting, northing } = this.wgs84ToUtm32(lat, lon);
+    const utmDelta = 100; // 100 meters in UTM units
     const delta = 0.001;
-    const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
 
     // Discover WMS layers
     let wmsLayers: string[] = [];
     try {
       const capParams = new URLSearchParams({
         SERVICE: 'WMS',
-        VERSION: '1.1.1',
+        VERSION: '1.3.0',
         REQUEST: 'GetCapabilities',
       });
       const capRes = await fetch(`${wmsUrl}?${capParams}`, {
@@ -240,85 +241,159 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
       wmsLayers = ['lgv_brw_zoniert_alle', 'Bodenrichtwert', '0'];
     }
 
+    // WMS strategies: try EPSG:25832 (native CRS) first, then EPSG:4326 fallbacks
+    const wmsStrategies: Array<{ version: string; bbox: string; srsParam: string; srs: string; xParam: string; yParam: string }> = [
+      // WMS 1.3.0 + EPSG:25832 (native CRS, most likely to work)
+      {
+        version: '1.3.0',
+        bbox: `${easting - utmDelta},${northing - utmDelta},${easting + utmDelta},${northing + utmDelta}`,
+        srsParam: 'CRS',
+        srs: 'EPSG:25832',
+        xParam: 'I',
+        yParam: 'J',
+      },
+      // WMS 1.3.0 + EPSG:4326 fallback (axis order: lat,lon)
+      {
+        version: '1.3.0',
+        bbox: `${lat - delta},${lon - delta},${lat + delta},${lon + delta}`,
+        srsParam: 'CRS',
+        srs: 'EPSG:4326',
+        xParam: 'I',
+        yParam: 'J',
+      },
+      // WMS 1.1.1 + EPSG:4326 fallback (axis order: lon,lat)
+      {
+        version: '1.1.1',
+        bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`,
+        srsParam: 'SRS',
+        srs: 'EPSG:4326',
+        xParam: 'X',
+        yParam: 'Y',
+      },
+    ];
+
     for (const layer of wmsLayers) {
-      for (const fmt of ['text/plain', 'application/vnd.ogc.gml', 'text/xml', 'application/json']) {
-        try {
-          const params = new URLSearchParams({
-            SERVICE: 'WMS',
-            VERSION: '1.1.1',
-            REQUEST: 'GetFeatureInfo',
-            LAYERS: layer,
-            QUERY_LAYERS: layer,
-            SRS: 'EPSG:4326',
-            BBOX: bbox,
-            WIDTH: '101',
-            HEIGHT: '101',
-            X: '50',
-            Y: '50',
-            INFO_FORMAT: fmt,
-            FEATURE_COUNT: '5',
-            STYLES: '',
-            FORMAT: 'image/png',
-          });
+      for (const strat of wmsStrategies) {
+        for (const fmt of ['text/plain', 'text/html', 'application/vnd.ogc.gml', 'text/xml', 'application/json']) {
+          try {
+            const params = new URLSearchParams({
+              SERVICE: 'WMS',
+              VERSION: strat.version,
+              REQUEST: 'GetFeatureInfo',
+              LAYERS: layer,
+              QUERY_LAYERS: layer,
+              [strat.srsParam]: strat.srs,
+              BBOX: strat.bbox,
+              WIDTH: '101',
+              HEIGHT: '101',
+              [strat.xParam]: '50',
+              [strat.yParam]: '50',
+              INFO_FORMAT: fmt,
+              FEATURE_COUNT: '5',
+              STYLES: '',
+              FORMAT: 'image/png',
+            });
 
-          const res = await fetch(`${wmsUrl}?${params}`, {
-            headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-            signal: AbortSignal.timeout(8000),
-          });
+            const res = await fetch(`${wmsUrl}?${params}`, {
+              headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+              signal: AbortSignal.timeout(8000),
+            });
 
-          if (!res.ok) continue;
+            if (!res.ok) continue;
 
-          const text = await res.text();
-          if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
-          if (text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html')) continue;
-          if (text.trim().length < 30) continue;
+            const text = await res.text();
+            if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
+            if (text.trim().length < 30) continue;
 
-          // Try JSON parse
-          if (text.trimStart().startsWith('{')) {
-            try {
-              const json = JSON.parse(text);
-              if (json.features?.length) {
-                const f = json.features[0];
-                const p = f.properties || {};
-                const wertRaw = p.BRW ?? p.brw ?? p.bodenrichtwert ?? p.brwkon ?? 0;
-                const wert = parseFloat(String(wertRaw));
-                if (wert > 0 && wert <= 500_000) {
-                  return {
-                    wert,
-                    stichtag: p.STAG || p.stag || p.stichtag || 'unbekannt',
-                    nutzungsart: p.NUTA || p.nuta || p.nutzungsart || 'unbekannt',
-                    entwicklungszustand: p.ENTW || p.entw || 'B',
-                    zone: p.BRZNAME || p.WNUM || p.wnum || '',
-                    gemeinde: p.GENA || p.ORTST || p.gena || p.ortst || 'Hamburg',
-                    bundesland: 'Hamburg',
-                    quelle: 'BORIS-HH (WMS)',
-                    lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
-                  };
-                }
+            // Try HTML table parse (HH services may return HTML with tables)
+            if (text.trimStart().startsWith('<!') || text.trimStart().startsWith('<html') || text.trimStart().startsWith('<HTML') || text.trimStart().startsWith('<table')) {
+              const wert = this.extractHtmlBrw(text);
+              if (wert && wert > 0 && wert <= 500_000) {
+                return {
+                  wert,
+                  stichtag: 'aktuell',
+                  nutzungsart: 'unbekannt',
+                  entwicklungszustand: 'B',
+                  zone: '',
+                  gemeinde: 'Hamburg',
+                  bundesland: 'Hamburg',
+                  quelle: customWmsUrl?.includes('UEK') ? 'BORIS-HH (UEK WMS)' : 'BORIS-HH (WMS)',
+                  lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
+                };
               }
-            } catch {
-              // not valid JSON, try XML/plain extraction
+              continue;
             }
-          }
 
-          // XML/plain extraction
-          const wert = this.extractGmlValue(text, ['BRW', 'brw', 'bodenrichtwert', 'brwkon']);
-          if (wert && wert > 0 && wert <= 500_000) {
-            return {
-              wert,
-              stichtag: this.extractGmlField(text, ['STAG', 'stag', 'stichtag']) || 'unbekannt',
-              nutzungsart: this.extractGmlField(text, ['NUTA', 'nuta', 'nutzungsart']) || 'unbekannt',
-              entwicklungszustand: this.extractGmlField(text, ['ENTW', 'entw']) || 'B',
-              zone: this.extractGmlField(text, ['BRZNAME', 'WNUM', 'wnum']) || '',
-              gemeinde: this.extractGmlField(text, ['GENA', 'ORTST', 'gena', 'ortst']) || 'Hamburg',
-              bundesland: 'Hamburg',
-              quelle: 'BORIS-HH (WMS)',
-              lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
-            };
+            // Try JSON parse
+            if (text.trimStart().startsWith('{')) {
+              try {
+                const json = JSON.parse(text);
+                if (json.features?.length) {
+                  const f = json.features[0];
+                  const p = f.properties || {};
+                  const wertRaw = p.BRW ?? p.brw ?? p.bodenrichtwert ?? p.brwkon ?? 0;
+                  const wert = parseFloat(String(wertRaw));
+                  if (wert > 0 && wert <= 500_000) {
+                    return {
+                      wert,
+                      stichtag: p.STAG || p.stag || p.stichtag || 'unbekannt',
+                      nutzungsart: p.NUTA || p.nuta || p.nutzungsart || 'unbekannt',
+                      entwicklungszustand: p.ENTW || p.entw || 'B',
+                      zone: p.BRZNAME || p.WNUM || p.wnum || '',
+                      gemeinde: p.GENA || p.ORTST || p.gena || p.ortst || 'Hamburg',
+                      bundesland: 'Hamburg',
+                      quelle: customWmsUrl?.includes('UEK') ? 'BORIS-HH (UEK WMS)' : 'BORIS-HH (WMS)',
+                      lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
+                    };
+                  }
+                }
+              } catch {
+                // not valid JSON, try XML/plain extraction
+              }
+            }
+
+            // XML/plain extraction
+            const wert = this.extractGmlValue(text, ['BRW', 'brw', 'bodenrichtwert', 'brwkon']);
+            if (wert && wert > 0 && wert <= 500_000) {
+              return {
+                wert,
+                stichtag: this.extractGmlField(text, ['STAG', 'stag', 'stichtag']) || 'unbekannt',
+                nutzungsart: this.extractGmlField(text, ['NUTA', 'nuta', 'nutzungsart']) || 'unbekannt',
+                entwicklungszustand: this.extractGmlField(text, ['ENTW', 'entw']) || 'B',
+                zone: this.extractGmlField(text, ['BRZNAME', 'WNUM', 'wnum']) || '',
+                gemeinde: this.extractGmlField(text, ['GENA', 'ORTST', 'gena', 'ortst']) || 'Hamburg',
+                bundesland: 'Hamburg',
+                quelle: customWmsUrl?.includes('UEK') ? 'BORIS-HH (UEK WMS)' : 'BORIS-HH (WMS)',
+                lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
+              };
+            }
+          } catch {
+            // try next format
           }
-        } catch {
-          // try next format
         }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Extract BRW value from HTML table response.
+   */
+  private extractHtmlBrw(html: string): number | null {
+    // Skip empty HTML bodies
+    if (html.replace(/<[^>]*>/g, '').trim().length < 3) return null;
+
+    const patterns = [
+      /(?:BRW|Bodenrichtwert|brwkon|WERT)[^<]*<\/t[dh]>\s*<td[^>]*>\s*([\d.,]+)/gi,
+      /([\d.,]+)\s*(?:EUR\/m|€\/m)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = pattern.exec(html);
+      if (match) {
+        let numStr = match[1].trim();
+        if (numStr.includes(',')) numStr = numStr.replace(/\./g, '').replace(',', '.');
+        const val = parseFloat(numStr);
+        if (val > 0 && val <= 500_000 && isFinite(val)) return val;
       }
     }
     return null;

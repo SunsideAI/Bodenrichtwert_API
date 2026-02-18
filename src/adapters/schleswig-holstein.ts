@@ -27,6 +27,48 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   private discoveredLayers: string[] | null = null;
   private discoveredUrl: string | null = null;
 
+  /**
+   * Convert WGS84 lat/lon to UTM Zone 32N (EPSG:25832).
+   * Standard Transverse Mercator projection formulas.
+   */
+  private wgs84ToUtm32(lat: number, lon: number): { easting: number; northing: number } {
+    const a = 6378137;
+    const f = 1 / 298.257223563;
+    const k0 = 0.9996;
+    const lon0 = 9; // central meridian for zone 32
+    const e2 = 2 * f - f * f;
+
+    const latRad = lat * Math.PI / 180;
+    const lon0Rad = lon0 * Math.PI / 180;
+    const lonRad = lon * Math.PI / 180;
+
+    const N = a / Math.sqrt(1 - e2 * Math.sin(latRad) ** 2);
+    const T = Math.tan(latRad) ** 2;
+    const C = (e2 / (1 - e2)) * Math.cos(latRad) ** 2;
+    const A = Math.cos(latRad) * (lonRad - lon0Rad);
+
+    const M = a * (
+      (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * latRad
+      - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * Math.sin(2 * latRad)
+      + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * Math.sin(4 * latRad)
+      - (35 * e2 ** 3 / 3072) * Math.sin(6 * latRad)
+    );
+
+    const easting = 500000 + k0 * N * (
+      A + (1 - T + C) * A ** 3 / 6
+      + (5 - 18 * T + T ** 2 + 72 * C - 58 * (e2 / (1 - e2))) * A ** 5 / 120
+    );
+    const northing = k0 * (
+      M + N * Math.tan(latRad) * (
+        A ** 2 / 2
+        + (5 - T + 9 * C + 4 * C ** 2) * A ** 4 / 24
+        + (61 - 58 * T + T ** 2 + 600 * C - 330 * (e2 / (1 - e2))) * A ** 6 / 720
+      )
+    );
+
+    return { easting, northing };
+  }
+
   // Static layer candidates – tried when GetCapabilities fails.
   // SH uses "Stichtag_YYYY" naming (confirmed from DANord VBORIS viewer).
   private readonly layerCandidates = [
@@ -157,10 +199,21 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
 
   private async queryWms(lat: number, lon: number, wmsUrl: string, layer: string): Promise<NormalizedBRW | null> {
     const delta = 0.001;
+    const { easting, northing } = this.wgs84ToUtm32(lat, lon);
+    const utmDelta = 100; // 100 meters in UTM units
 
-    // Try WMS 1.3.0 FIRST since SH GetCapabilities only returns for 1.3.0
+    // Try EPSG:25832 (native CRS) FIRST — SH services natively use UTM Zone 32N
     const wmsVersions: Array<{ version: string; bbox: string; srsParam: string; srs: string; xParam: string; yParam: string }> = [
-      // WMS 1.3.0: CRS, I/J, bbox = lat,lon,lat,lon (axis order flipped for EPSG:4326)
+      // WMS 1.3.0 + EPSG:25832 (native CRS, most likely to work)
+      {
+        version: '1.3.0',
+        bbox: `${easting - utmDelta},${northing - utmDelta},${easting + utmDelta},${northing + utmDelta}`,
+        srsParam: 'CRS',
+        srs: 'EPSG:25832',
+        xParam: 'I',
+        yParam: 'J',
+      },
+      // WMS 1.3.0 + EPSG:4326 fallback (axis order: lat,lon for EPSG:4326)
       {
         version: '1.3.0',
         bbox: `${lat - delta},${lon - delta},${lat + delta},${lon + delta}`,
@@ -169,7 +222,7 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
         xParam: 'I',
         yParam: 'J',
       },
-      // WMS 1.1.1: SRS, X/Y, bbox = lon,lat,lon,lat
+      // WMS 1.1.1 + EPSG:4326 fallback (axis order: lon,lat)
       {
         version: '1.1.1',
         bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`,
@@ -180,7 +233,6 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
       },
     ];
 
-    let logged = false;
     // text/html is often the only supported format for GDI-DE services
     for (const v of wmsVersions) {
       for (const infoFormat of ['text/html', 'text/plain', 'text/xml', 'application/vnd.ogc.gml']) {
@@ -212,12 +264,6 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
           if (!res.ok) continue;
 
           const text = await res.text();
-
-          // Debug: log first successful response per layer
-          if (!logged && text.trim().length > 10) {
-            console.log(`SH WMS [${layer}/${v.version}/${infoFormat}] → ${res.status} (${text.length} chars): ${text.substring(0, 300).replace(/\n/g, '\\n')}`);
-            logged = true;
-          }
 
           if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
           if (text.trim().length < 20) continue;
