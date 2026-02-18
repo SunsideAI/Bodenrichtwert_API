@@ -27,8 +27,12 @@ export class SachsenAdapter implements BodenrichtwertAdapter {
   private readonly proxyUrl = 'https://www.landesvermessung.sachsen.de/fp/http-proxy/svc';
 
   // Layer names as discovered via GetCapabilities (cfg=boris_YEAR)
-  // brw_2024 maps to brw_bauland_2024 on the server
-  private readonly layers = ['brw_2024', 'brw_2023'];
+  // brw_2024 is a shorthand that maps to brw_bauland_2024 on the server
+  // Include both forms since mapping may not always work
+  private readonly layers = [
+    'brw_2024', 'brw_bauland_2024',
+    'brw_2023', 'brw_bauland_2023',
+  ];
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
     for (const layer of this.layers) {
@@ -70,7 +74,7 @@ export class SachsenAdapter implements BodenrichtwertAdapter {
     const url = `${this.proxyUrl}?${params}`;
     const res = await fetch(url, {
       headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!res.ok) return null;

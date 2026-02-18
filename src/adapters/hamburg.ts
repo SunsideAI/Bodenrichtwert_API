@@ -38,136 +38,234 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
     try {
-      // TypeName dynamisch ermitteln falls noch nicht bekannt
-      const typeName = await this.getTypeName();
-      if (!typeName) {
-        console.error('HH WFS: Kein Feature-Type gefunden, versuche Fallbacks');
-        // Try all known fallback type names directly
-        for (const fallback of this.fallbackTypeNames) {
-          const result = await this.tryQueryWithType(lat, lon, fallback);
-          if (result) {
-            this.discoveredTypeName = fallback;
-            return result;
-          }
+      // Discover WFS type names
+      const typeNames = await this.getTypeNames();
+
+      // Try WFS with multiple bbox strategies (axis order varies between deegree implementations)
+      for (const typeName of typeNames) {
+        for (const bboxStrategy of this.buildBboxStrategies(lat, lon)) {
+          const result = await this.tryWfsGml(typeName, bboxStrategy);
+          if (result) return result;
         }
-        return null;
       }
 
-      return await this.tryQueryWithType(lat, lon, typeName);
+      // WMS GetFeatureInfo fallback – the WMS has different layer names
+      return await this.tryWmsQuery(lat, lon);
     } catch (err) {
       console.error('HH adapter error:', err);
       return null;
     }
   }
 
-  private async tryQueryWithType(lat: number, lon: number, typeName: string): Promise<NormalizedBRW | null> {
-    // Erst JSON versuchen
-    const result = await this.tryJsonQuery(typeName, lat, lon);
-    if (result) return result;
-
-    // Dann GML Fallback
-    return await this.tryGmlQuery(typeName, lat, lon);
+  /**
+   * Build multiple bbox strings to work around axis order ambiguity.
+   * Deegree WFS 2.0.0 with EPSG:4326 should use (lat,lon) but sometimes expects (lon,lat).
+   */
+  private buildBboxStrategies(lat: number, lon: number): { bbox: string; version: string; typeParam: string }[] {
+    const delta = 0.001;
+    return [
+      // WFS 2.0.0: lat,lon order (OGC standard for EPSG:4326)
+      {
+        bbox: `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`,
+        version: '2.0.0',
+        typeParam: 'typeNames',
+      },
+      // WFS 2.0.0: lon,lat order (common deegree bug)
+      {
+        bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta},urn:ogc:def:crs:EPSG::4326`,
+        version: '2.0.0',
+        typeParam: 'typeNames',
+      },
+      // WFS 1.1.0: lon,lat with EPSG:4326
+      {
+        bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta},EPSG:4326`,
+        version: '1.1.0',
+        typeParam: 'typeName',
+      },
+    ];
   }
 
-  private async tryJsonQuery(typeName: string, lat: number, lon: number): Promise<NormalizedBRW | null> {
-    const delta = 0.0005;
-    const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`;
+  private async tryWfsGml(
+    typeName: string,
+    strategy: { bbox: string; version: string; typeParam: string }
+  ): Promise<NormalizedBRW | null> {
+    try {
+      const params = new URLSearchParams({
+        service: 'WFS',
+        version: strategy.version,
+        request: 'GetFeature',
+        [strategy.typeParam]: typeName,
+        bbox: strategy.bbox,
+        count: '5',
+        maxFeatures: '5',
+      });
 
-    const params = new URLSearchParams({
-      service: 'WFS',
-      version: '2.0.0',
-      request: 'GetFeature',
-      typeNames: typeName,
-      bbox: bbox,
-      outputFormat: 'application/json',
-      count: '5',
-    });
+      const url = `${this.wfsUrl}?${params}`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+        signal: AbortSignal.timeout(8000),
+      });
 
-    const url = `${this.wfsUrl}?${params}`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-      signal: AbortSignal.timeout(10000),
-    });
+      if (!res.ok) return null;
 
-    if (!res.ok) return null;
+      const xml = await res.text();
+      if (xml.includes('ExceptionReport') || xml.includes('ServiceException')) return null;
+      if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
 
-    const text = await res.text();
-    if (!text.trimStart().startsWith('{')) return null;
+      const wert = this.extractGmlValue(xml, ['BRW', 'brw', 'bodenrichtwert', 'brwkon']);
+      if (!wert || wert <= 0 || wert > 500000) return null;
 
-    const json = JSON.parse(text);
-    if (!json.features?.length) return null;
+      return {
+        wert,
+        stichtag: this.extractGmlField(xml, ['STAG', 'stag', 'STICHTAG', 'stichtag']) || 'unbekannt',
+        nutzungsart: this.extractGmlField(xml, ['NUTA', 'nutzungsart', 'NUTZUNG', 'nuta']) || 'unbekannt',
+        entwicklungszustand: this.extractGmlField(xml, ['ENTW', 'entwicklungszustand', 'entw']) || 'B',
+        zone: this.extractGmlField(xml, ['BRZNAME', 'WNUM', 'brw_zone', 'wnum']) || '',
+        gemeinde: this.extractGmlField(xml, ['GENA', 'ORTST', 'gemeinde', 'gena', 'ortst']) || 'Hamburg',
+        bundesland: 'Hamburg',
+        quelle: 'BORIS-HH',
+        lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
+      };
+    } catch {
+      return null;
+    }
+  }
 
-    // Wohnbau-BRW bevorzugen (VBORIS Feld: NUTA oder nutzungsart)
-    const wohn = json.features.find(
-      (f: any) => {
-        const nuta = f.properties?.NUTA || f.properties?.nuta || f.properties?.nutzungsart || '';
-        return nuta.startsWith('W') || nuta.toLowerCase().includes('wohn');
+  /**
+   * WMS GetFeatureInfo fallback.
+   * Hamburg also has a WMS endpoint with different layer names.
+   */
+  private async tryWmsQuery(lat: number, lon: number): Promise<NormalizedBRW | null> {
+    const wmsUrl = this.wfsUrl.replace('WFS', 'WMS');
+    const delta = 0.001;
+    const bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
+
+    // Discover WMS layers
+    let wmsLayers: string[] = [];
+    try {
+      const capParams = new URLSearchParams({
+        SERVICE: 'WMS',
+        VERSION: '1.1.1',
+        REQUEST: 'GetCapabilities',
+      });
+      const capRes = await fetch(`${wmsUrl}?${capParams}`, {
+        headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (capRes.ok) {
+        const capXml = await capRes.text();
+        const allLayers = [...capXml.matchAll(/<Name>([^<]+)<\/Name>/gi)]
+          .map(m => m[1].trim())
+          .filter(n => n.length > 0 && n.length < 120);
+        // Prefer brw_zoniert layers, then any brw_ layer
+        wmsLayers = allLayers.filter(n =>
+          n.includes('brw_zoniert') || n.includes('brw_zonal')
+        );
+        if (!wmsLayers.length) {
+          wmsLayers = allLayers.filter(n =>
+            n.includes('brw') && !n.includes('referenz') && !n.includes('beschriftung')
+          );
+        }
+        if (wmsLayers.length > 0) {
+          console.log(`HH WMS: Discovered layers: ${wmsLayers.slice(0, 5).join(', ')}`);
+        }
       }
-    ) || json.features[0];
+    } catch {
+      // proceed with fallback layers
+    }
 
-    const p = wohn.properties;
+    // Fallback layer candidates
+    if (!wmsLayers.length) {
+      wmsLayers = ['lgv_brw_zoniert_alle', 'Bodenrichtwert', '0'];
+    }
 
-    const wertRaw = p.BRW ?? p.brw ?? p.bodenrichtwert ?? p.wert;
-    const wert = parseFloat(String(wertRaw ?? 0));
-    if (!wert || wert <= 0 || wert > 500000) return null;
+    for (const layer of wmsLayers) {
+      for (const fmt of ['text/xml', 'application/json', 'text/plain']) {
+        try {
+          const params = new URLSearchParams({
+            SERVICE: 'WMS',
+            VERSION: '1.1.1',
+            REQUEST: 'GetFeatureInfo',
+            LAYERS: layer,
+            QUERY_LAYERS: layer,
+            SRS: 'EPSG:4326',
+            BBOX: bbox,
+            WIDTH: '101',
+            HEIGHT: '101',
+            X: '50',
+            Y: '50',
+            INFO_FORMAT: fmt,
+            FEATURE_COUNT: '5',
+            STYLES: '',
+            FORMAT: 'image/png',
+          });
 
-    return {
-      wert,
-      stichtag: p.STAG || p.stag || p.STICHTAG || p.stichtag || 'unbekannt',
-      nutzungsart: p.NUTA || p.nutzungsart || p.NUTZUNG || 'unbekannt',
-      entwicklungszustand: p.ENTW || p.entwicklungszustand || 'B',
-      zone: p.BRZNAME || p.WNUM || p.brw_zone || '',
-      gemeinde: p.GENA || p.ORTST || 'Hamburg',
-      bundesland: 'Hamburg',
-      quelle: 'BORIS-HH',
-      lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
-    };
+          const res = await fetch(`${wmsUrl}?${params}`, {
+            headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+            signal: AbortSignal.timeout(8000),
+          });
+
+          if (!res.ok) continue;
+
+          const text = await res.text();
+          if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
+          if (text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<html')) continue;
+          if (text.trim().length < 30) continue;
+
+          // Try JSON parse
+          if (text.trimStart().startsWith('{')) {
+            try {
+              const json = JSON.parse(text);
+              if (json.features?.length) {
+                const f = json.features[0];
+                const p = f.properties || {};
+                const wertRaw = p.BRW ?? p.brw ?? p.bodenrichtwert ?? p.brwkon ?? 0;
+                const wert = parseFloat(String(wertRaw));
+                if (wert > 0 && wert <= 500_000) {
+                  return {
+                    wert,
+                    stichtag: p.STAG || p.stag || p.stichtag || 'unbekannt',
+                    nutzungsart: p.NUTA || p.nuta || p.nutzungsart || 'unbekannt',
+                    entwicklungszustand: p.ENTW || p.entw || 'B',
+                    zone: p.BRZNAME || p.WNUM || p.wnum || '',
+                    gemeinde: p.GENA || p.ORTST || p.gena || p.ortst || 'Hamburg',
+                    bundesland: 'Hamburg',
+                    quelle: 'BORIS-HH (WMS)',
+                    lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
+                  };
+                }
+              }
+            } catch {
+              // not valid JSON, try XML/plain extraction
+            }
+          }
+
+          // XML/plain extraction
+          const wert = this.extractGmlValue(text, ['BRW', 'brw', 'bodenrichtwert', 'brwkon']);
+          if (wert && wert > 0 && wert <= 500_000) {
+            return {
+              wert,
+              stichtag: this.extractGmlField(text, ['STAG', 'stag', 'stichtag']) || 'unbekannt',
+              nutzungsart: this.extractGmlField(text, ['NUTA', 'nuta', 'nutzungsart']) || 'unbekannt',
+              entwicklungszustand: this.extractGmlField(text, ['ENTW', 'entw']) || 'B',
+              zone: this.extractGmlField(text, ['BRZNAME', 'WNUM', 'wnum']) || '',
+              gemeinde: this.extractGmlField(text, ['GENA', 'ORTST', 'gena', 'ortst']) || 'Hamburg',
+              bundesland: 'Hamburg',
+              quelle: 'BORIS-HH (WMS)',
+              lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
+            };
+          }
+        } catch {
+          // try next format
+        }
+      }
+    }
+    return null;
   }
 
-  private async tryGmlQuery(typeName: string, lat: number, lon: number): Promise<NormalizedBRW | null> {
-    const delta = 0.0005;
-    const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`;
-
-    const params = new URLSearchParams({
-      service: 'WFS',
-      version: '2.0.0',
-      request: 'GetFeature',
-      typeNames: typeName,
-      bbox: bbox,
-      count: '5',
-    });
-
-    const url = `${this.wfsUrl}?${params}`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!res.ok) return null;
-
-    const xml = await res.text();
-    if (xml.includes('ExceptionReport') || xml.includes('ServiceException')) return null;
-    if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
-
-    const wert = this.extractGmlValue(xml, ['BRW', 'brw', 'bodenrichtwert']);
-    if (!wert || wert <= 0 || wert > 500000) return null;
-
-    return {
-      wert,
-      stichtag: this.extractGmlField(xml, ['STAG', 'stag', 'STICHTAG', 'stichtag']) || 'unbekannt',
-      nutzungsart: this.extractGmlField(xml, ['NUTA', 'nutzungsart', 'NUTZUNG']) || 'unbekannt',
-      entwicklungszustand: this.extractGmlField(xml, ['ENTW', 'entwicklungszustand']) || 'B',
-      zone: this.extractGmlField(xml, ['BRZNAME', 'WNUM', 'brw_zone']) || '',
-      gemeinde: this.extractGmlField(xml, ['GENA', 'ORTST', 'gemeinde']) || 'Hamburg',
-      bundesland: 'Hamburg',
-      quelle: 'BORIS-HH',
-      lizenz: 'Datenlizenz Deutschland – Namensnennung – Version 2.0',
-    };
-  }
-
-  /** Ermittelt den FeatureType-Namen via GetCapabilities */
-  private async getTypeName(): Promise<string | null> {
-    if (this.discoveredTypeName) return this.discoveredTypeName;
+  /** Ermittelt alle FeatureType-Namen via GetCapabilities, priorisiert */
+  private async getTypeNames(): Promise<string[]> {
+    if (this.discoveredTypeName) return [this.discoveredTypeName];
 
     try {
       const params = new URLSearchParams({
@@ -181,16 +279,11 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
         signal: AbortSignal.timeout(8000),
       });
 
-      if (!res.ok) return null;
+      if (!res.ok) return this.fallbackTypeNames;
 
       const xml = await res.text();
 
-      // Extract <Name> from <FeatureType> blocks.
-      // The WFS 2.0.0 response uses default namespace so elements are plain <Name>.
-      // Use multiline ([\s\S]*?) to handle names with whitespace/newlines.
-      // Also try case-insensitive to handle <name> or <NAME> variants.
-
-      // Strategy 1: Extract full FeatureType blocks, then Name from each
+      // Extract <Name> from <FeatureType> blocks
       const ftBlocks = [...xml.matchAll(
         /<(?:[a-zA-Z]*:)?FeatureType[^>]*>([\s\S]*?)<\/(?:[a-zA-Z]*:)?FeatureType>/gi
       )];
@@ -206,38 +299,31 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
         }
       }
 
-      // Strategy 2: Global <Name> search as fallback
-      if (typeMatches.length === 0) {
-        const globalNames = [...xml.matchAll(
-          /<(?:[a-zA-Z]*:)?Name[^>]*>([\s\S]*?)<\/(?:[a-zA-Z]*:)?Name>/gi
-        )]
-          .map(m => m[1].trim())
-          .filter(n =>
-            n.length > 0 &&
-            n.length < 120 &&
-            !n.includes('WFS_Capabilities') &&
-            !n.includes('OperationsMetadata')
-          );
-        typeMatches.push(...globalNames);
-      }
-
       console.log(`HH WFS: Name-Suche: ${typeMatches.length} Treffer, FeatureType-Blöcke: ${ftBlocks.length}`);
-
       if (typeMatches.length > 0) {
         console.log(`HH WFS: Gefundene FeatureTypes: ${typeMatches.slice(0, 8).join(', ')}`);
       }
 
-      // Priorisierte Suche
-      const preferred = typeMatches.find(n =>
-        n.toLowerCase().includes('bodenrichtwert') ||
-        n.toLowerCase().includes('aktuell') ||
-        n.toLowerCase().includes('zonal')
-      );
+      if (typeMatches.length === 0) return this.fallbackTypeNames;
 
-      this.discoveredTypeName = preferred || typeMatches[0] || null;
-      return this.discoveredTypeName;
+      // Prioritize: _zoniert_alle first, then _zoniert_ by year desc, then _zonen_
+      const sorted: string[] = [];
+      const alle = typeMatches.filter(n => n.includes('_alle'));
+      const zoniert = typeMatches
+        .filter(n => n.includes('_zoniert_') && !n.includes('_alle'))
+        .sort((a, b) => b.localeCompare(a)); // descending year
+      const zonen = typeMatches
+        .filter(n => n.includes('_zonen_'))
+        .sort((a, b) => b.localeCompare(a));
+      const rest = typeMatches.filter(n =>
+        !n.includes('_alle') && !n.includes('_zoniert_') && !n.includes('_zonen_')
+      );
+      sorted.push(...alle, ...zoniert, ...zonen, ...rest);
+
+      // Only try first few to avoid excessive requests
+      return sorted.slice(0, 5);
     } catch {
-      return null;
+      return this.fallbackTypeNames.slice(0, 5);
     }
   }
 
