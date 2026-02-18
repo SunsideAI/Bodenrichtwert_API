@@ -15,31 +15,55 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
   private wfsUrl = 'https://geodienste.hamburg.de/HH_WFS_Bodenrichtwerte';
   private discoveredTypeName: string | null = null;
 
+  // Known type names for Hamburg VBORIS WFS (tried in order if discovery fails)
+  private readonly fallbackTypeNames = [
+    'app:Bodenrichtwert_Zonal',
+    'app:bodenrichtwert_zonal',
+    'app:Bodenrichtwert',
+    'app:bodenrichtwert',
+    'HH_WFS_Bodenrichtwerte:Bodenrichtwert_Zonal',
+    'brw:Bodenrichtwert',
+    'Bodenrichtwert_Zonal',
+    'Bodenrichtwert',
+  ];
+
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
     try {
       // TypeName dynamisch ermitteln falls noch nicht bekannt
       const typeName = await this.getTypeName();
       if (!typeName) {
-        console.error('HH WFS: Kein Feature-Type gefunden');
+        console.error('HH WFS: Kein Feature-Type gefunden, versuche Fallbacks');
+        // Try all known fallback type names directly
+        for (const fallback of this.fallbackTypeNames) {
+          const result = await this.tryQueryWithType(lat, lon, fallback);
+          if (result) {
+            this.discoveredTypeName = fallback;
+            return result;
+          }
+        }
         return null;
       }
 
-      const delta = 0.0005;
-      const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`;
-
-      // Erst JSON versuchen
-      const result = await this.tryJsonQuery(typeName, bbox);
-      if (result) return result;
-
-      // Dann GML Fallback
-      return await this.tryGmlQuery(typeName, bbox);
+      return await this.tryQueryWithType(lat, lon, typeName);
     } catch (err) {
       console.error('HH adapter error:', err);
       return null;
     }
   }
 
-  private async tryJsonQuery(typeName: string, bbox: string): Promise<NormalizedBRW | null> {
+  private async tryQueryWithType(lat: number, lon: number, typeName: string): Promise<NormalizedBRW | null> {
+    // Erst JSON versuchen
+    const result = await this.tryJsonQuery(typeName, lat, lon);
+    if (result) return result;
+
+    // Dann GML Fallback
+    return await this.tryGmlQuery(typeName, lat, lon);
+  }
+
+  private async tryJsonQuery(typeName: string, lat: number, lon: number): Promise<NormalizedBRW | null> {
+    const delta = 0.0005;
+    const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`;
+
     const params = new URLSearchParams({
       service: 'WFS',
       version: '2.0.0',
@@ -74,12 +98,13 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
 
     const p = wohn.properties;
 
-    const wert = parseFloat(String(p.BRW || p.brw || p.bodenrichtwert || 0));
-    if (!wert || wert <= 0) return null;
+    const wertRaw = p.BRW ?? p.brw ?? p.bodenrichtwert ?? p.wert;
+    const wert = parseFloat(String(wertRaw ?? 0));
+    if (!wert || wert <= 0 || wert > 500000) return null;
 
     return {
       wert,
-      stichtag: p.STAG || p.stichtag || p.STICHTAG || 'unbekannt',
+      stichtag: p.STAG || p.stag || p.STICHTAG || p.stichtag || 'unbekannt',
       nutzungsart: p.NUTA || p.nutzungsart || p.NUTZUNG || 'unbekannt',
       entwicklungszustand: p.ENTW || p.entwicklungszustand || 'B',
       zone: p.BRZNAME || p.WNUM || p.brw_zone || '',
@@ -90,7 +115,10 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
     };
   }
 
-  private async tryGmlQuery(typeName: string, bbox: string): Promise<NormalizedBRW | null> {
+  private async tryGmlQuery(typeName: string, lat: number, lon: number): Promise<NormalizedBRW | null> {
+    const delta = 0.0005;
+    const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta},urn:ogc:def:crs:EPSG::4326`;
+
     const params = new URLSearchParams({
       service: 'WFS',
       version: '2.0.0',
@@ -113,11 +141,11 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
     if (xml.includes('numberOfFeatures="0"') || xml.includes('numberReturned="0"')) return null;
 
     const wert = this.extractGmlValue(xml, ['BRW', 'brw', 'bodenrichtwert']);
-    if (!wert || wert <= 0) return null;
+    if (!wert || wert <= 0 || wert > 500000) return null;
 
     return {
       wert,
-      stichtag: this.extractGmlField(xml, ['STAG', 'stichtag', 'STICHTAG']) || 'unbekannt',
+      stichtag: this.extractGmlField(xml, ['STAG', 'stag', 'STICHTAG', 'stichtag']) || 'unbekannt',
       nutzungsart: this.extractGmlField(xml, ['NUTA', 'nutzungsart', 'NUTZUNG']) || 'unbekannt',
       entwicklungszustand: this.extractGmlField(xml, ['ENTW', 'entwicklungszustand']) || 'B',
       zone: this.extractGmlField(xml, ['BRZNAME', 'WNUM', 'brw_zone']) || '',
@@ -148,15 +176,26 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
 
       const xml = await res.text();
 
-      // FeatureType-Name aus GetCapabilities extrahieren
-      // Bevorzugt "aktuell" oder "zonal" Layer
-      const typeMatches = [...xml.matchAll(/<(?:Name|ows:Name)>([^<]+)<\//gi)]
-        .map(m => m[1])
-        .filter(n => !n.includes('WFS_Capabilities') && !n.includes('OperationsMetadata'));
+      // Match <Name>, <wfs:Name>, <ows:Name> etc. within FeatureType blocks
+      const typeMatches = [...xml.matchAll(/<(?:[a-zA-Z]+:)?Name>([^<]+)<\/(?:[a-zA-Z]+:)?Name>/g)]
+        .map(m => m[1].trim())
+        .filter(n =>
+          !n.includes('WFS_Capabilities') &&
+          !n.includes('OperationsMetadata') &&
+          !n.includes('WFS') &&
+          n.length > 0 &&
+          n.length < 100
+        );
+
+      if (typeMatches.length > 0) {
+        console.log(`HH WFS: Gefundene FeatureTypes: ${typeMatches.slice(0, 5).join(', ')}`);
+      }
 
       // Priorisierte Suche
       const preferred = typeMatches.find(n =>
-        n.toLowerCase().includes('aktuell') || n.toLowerCase().includes('bodenrichtwert')
+        n.toLowerCase().includes('bodenrichtwert') ||
+        n.toLowerCase().includes('aktuell') ||
+        n.toLowerCase().includes('zonal')
       );
 
       this.discoveredTypeName = preferred || typeMatches[0] || null;
@@ -168,7 +207,7 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
 
   private extractGmlValue(xml: string, fields: string[]): number | null {
     for (const field of fields) {
-      const re = new RegExp(`<[^>]*:?${field}[^>]*>([\\d.,]+)<`, 'i');
+      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([\\d.,]+)<`, 'i');
       const match = xml.match(re);
       if (match) {
         let numStr = match[1];
@@ -184,7 +223,7 @@ export class HamburgAdapter implements BodenrichtwertAdapter {
 
   private extractGmlField(xml: string, fields: string[]): string | null {
     for (const field of fields) {
-      const re = new RegExp(`<[^>]*:?${field}[^>]*>([^<]+)<`, 'i');
+      const re = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([^<]+)<`, 'i');
       const match = xml.match(re);
       if (match) return match[1].trim();
     }

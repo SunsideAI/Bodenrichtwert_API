@@ -15,11 +15,13 @@ export class SachsenAnhaltAdapter implements BodenrichtwertAdapter {
 
   private baseUrl = 'https://www.geodatenportal.sachsen-anhalt.de/wss/service';
 
-  // Mögliche Layer-Namen
+  // Max realistic BRW
+  private readonly MAX_BRW = 500_000;
+
+  // Layer-Kandidaten für den ST WMS
   private layerCandidates = ['Bauland', 'BRW', 'bodenrichtwerte', '0', '1'];
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    // Versuche aktuellstes Jahr zuerst
     for (const year of ['2024', '2022']) {
       for (const layer of this.layerCandidates) {
         try {
@@ -86,25 +88,44 @@ export class SachsenAnhaltAdapter implements BodenrichtwertAdapter {
   }
 
   private extractValue(text: string): number | null {
-    const patterns = [
-      /<[^>]*:?(?:brw|wert|bodenrichtwert|richtwert|BRW|Wert|Bodenrichtwert)[^>]*>([\d.,]+)<\//i,
+    // Try known exact VBORIS field names first (avoid matching BEZUGSWERT, GRUNDWERT etc.)
+    const exactPatterns = [
+      // Exact tag: <BRW>...</BRW> or <ns:BRW>...</ns:BRW>
+      /<(?:[a-zA-Z]+:)?BRW>(\d+(?:[.,]\d+)?)</i,
+      // Exact bodenrichtwert tag
+      /<(?:[a-zA-Z]+:)?bodenrichtwert>(\d+(?:[.,]\d+)?)</i,
+      // FIELDS attribute style (e.g. NRW style): BRW="6600"
+      /\bBRW="(\d+(?:[.,]\d+)?)"/i,
+      // EUR/m² mention in text
       /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m|€\/m)/i,
-      /(?:brw|wert|bodenrichtwert)[:\s=]*([\d.,]+)/i,
     ];
-    for (const pattern of patterns) {
+
+    for (const pattern of exactPatterns) {
       const match = text.match(pattern);
       if (match) {
-        const val = parseFloat(match[1].replace(',', '.'));
-        if (val > 0) return val;
+        let numStr = match[1];
+        // German number format: 1.250,50 → 1250.50
+        if (numStr.includes(',')) {
+          numStr = numStr.replace(/\./g, '').replace(',', '.');
+        }
+        const val = parseFloat(numStr);
+        if (val > 0 && val <= this.MAX_BRW && isFinite(val)) return val;
       }
     }
+
     return null;
   }
 
   private extractField(text: string, field: string): string | null {
-    const re = new RegExp(`<[^>]*:?${field}[^>]*>([^<]+)<`, 'i');
-    const match = text.match(re);
-    return match ? match[1].trim() : null;
+    // FIELDS attribute style (e.g. field="value")
+    const attrRe = new RegExp(`\\b${field}="([^"]*)"`, 'i');
+    const attrMatch = text.match(attrRe);
+    if (attrMatch) return attrMatch[1].trim();
+
+    // XML tag style
+    const tagRe = new RegExp(`<(?:[a-zA-Z]+:)?${field}>([^<]+)<`, 'i');
+    const tagMatch = text.match(tagRe);
+    return tagMatch ? tagMatch[1].trim() : null;
   }
 
   async healthCheck(): Promise<boolean> {
