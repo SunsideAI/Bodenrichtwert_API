@@ -48,7 +48,9 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
     }
 
     const urlsToTry = this.discoveredUrl ? [this.discoveredUrl] : this.wmsUrls;
-    const layersToTry = this.discoveredLayers?.length ? this.discoveredLayers : this.layerCandidates;
+    // Limit layers to avoid excessive requests (each layer tries multiple versions × formats)
+    const allLayers = this.discoveredLayers?.length ? this.discoveredLayers : this.layerCandidates;
+    const layersToTry = allLayers.slice(0, 8);
 
     for (const wmsUrl of urlsToTry) {
       for (const layer of layersToTry) {
@@ -106,21 +108,42 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
             continue;
           }
 
-          // Extract <Name> elements from layer sections
+          // Extract <Name> elements from layer sections, skip style names
           const layers = [...xml.matchAll(/<Name>([^<]+)<\/Name>/gi)]
             .map(m => m[1].trim())
-            .filter(n => n.length > 0 && n.length < 100 && !n.includes('WMS') && !n.includes('http'));
+            .filter(n =>
+              n.length > 2 && n.length < 100 &&
+              !n.includes('WMS') && !n.includes('http') &&
+              n !== 'default'  // filter out style names
+            );
 
           if (layers.length > 0) {
             console.log(`SH WMS: Discovered ${layers.length} layers at ${baseUrl} (v${version}): ${layers.slice(0, 10).join(', ')}`);
-            // Prefer BRW/Bodenrichtwert layers, filter out group layers
-            const brwLayers = layers.filter(n =>
-              n.toLowerCase().includes('brw') ||
-              n.toLowerCase().includes('bodenrichtwert') ||
-              n.toLowerCase().includes('stichtag') ||
-              n.toLowerCase().includes('bauland')
-            );
-            this.discoveredLayers = brwLayers.length > 0 ? brwLayers : layers;
+
+            // Include BRW-related layers AND group/position layers
+            const brwLayers = layers.filter(n => {
+              const lc = n.toLowerCase();
+              return lc.includes('bodenrichtwert') ||  // Bodenrichtwertzonen_YYYY
+                lc.includes('richtwert') ||            // Richtwertpositionen_YYYY
+                lc.includes('stichtag') ||             // Stichtag_YYYY
+                lc.includes('brw') ||
+                lc.includes('bauland') ||
+                lc === 'vboris';                       // group layer
+            });
+
+            // Sort by year descending (most recent first)
+            const sorted = brwLayers.sort((a, b) => {
+              const yearA = a.match(/_(\d{4})/)?.[1] || '0000';
+              const yearB = b.match(/_(\d{4})/)?.[1] || '0000';
+              if (yearB !== yearA) return yearB.localeCompare(yearA);
+              // Prefer Bodenrichtwertzonen over Richtwertpositionen
+              if (a.includes('Bodenrichtwert') && !b.includes('Bodenrichtwert')) return -1;
+              if (b.includes('Bodenrichtwert') && !a.includes('Bodenrichtwert')) return 1;
+              return 0;
+            });
+
+            console.log(`SH WMS: Selected ${sorted.length} BRW layers: ${sorted.slice(0, 8).join(', ')}`);
+            this.discoveredLayers = sorted.length > 0 ? sorted : layers;
             this.discoveredUrl = baseUrl;
             return;
           }
@@ -135,17 +158,8 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
   private async queryWms(lat: number, lon: number, wmsUrl: string, layer: string): Promise<NormalizedBRW | null> {
     const delta = 0.001;
 
-    // Try both WMS 1.1.1 and 1.3.0 since SH may only support 1.3.0
+    // Try WMS 1.3.0 FIRST since SH GetCapabilities only returns for 1.3.0
     const wmsVersions: Array<{ version: string; bbox: string; srsParam: string; srs: string; xParam: string; yParam: string }> = [
-      // WMS 1.1.1: SRS, X/Y, bbox = lon,lat,lon,lat
-      {
-        version: '1.1.1',
-        bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`,
-        srsParam: 'SRS',
-        srs: 'EPSG:4326',
-        xParam: 'X',
-        yParam: 'Y',
-      },
       // WMS 1.3.0: CRS, I/J, bbox = lat,lon,lat,lon (axis order flipped for EPSG:4326)
       {
         version: '1.3.0',
@@ -155,8 +169,18 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
         xParam: 'I',
         yParam: 'J',
       },
+      // WMS 1.1.1: SRS, X/Y, bbox = lon,lat,lon,lat
+      {
+        version: '1.1.1',
+        bbox: `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`,
+        srsParam: 'SRS',
+        srs: 'EPSG:4326',
+        xParam: 'X',
+        yParam: 'Y',
+      },
     ];
 
+    let logged = false;
     // text/html is often the only supported format for GDI-DE services
     for (const v of wmsVersions) {
       for (const infoFormat of ['text/html', 'text/plain', 'text/xml', 'application/vnd.ogc.gml']) {
@@ -188,11 +212,18 @@ export class SchleswigHolsteinAdapter implements BodenrichtwertAdapter {
           if (!res.ok) continue;
 
           const text = await res.text();
+
+          // Debug: log first successful response per layer
+          if (!logged && text.trim().length > 10) {
+            console.log(`SH WMS [${layer}/${v.version}/${infoFormat}] → ${res.status} (${text.length} chars): ${text.substring(0, 300).replace(/\n/g, '\\n')}`);
+            logged = true;
+          }
+
           if (text.includes('ServiceException') || text.includes('ExceptionReport')) continue;
-          if (text.trim().length < 30) continue;
+          if (text.trim().length < 20) continue;
 
           // For HTML responses, parse tables for BRW values
-          if (text.trimStart().startsWith('<!') || text.trimStart().startsWith('<html') || text.trimStart().startsWith('<HTML') || text.trimStart().startsWith('<META')) {
+          if (text.trimStart().startsWith('<!') || text.trimStart().startsWith('<html') || text.trimStart().startsWith('<HTML') || text.trimStart().startsWith('<META') || text.trimStart().startsWith('<table')) {
             const result = this.parseHtmlTable(text);
             if (result) return result;
             continue;
