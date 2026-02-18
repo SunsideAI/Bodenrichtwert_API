@@ -2,15 +2,28 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
 /**
  * Nordrhein-Westfalen Adapter
  *
- * Nutzt den boris.nrw.de WFS 2.0 Endpunkt.
- * Älteste und umfangreichste offene BRW-Daten (seit 2011).
- * CRS: EPSG:25832 (UTM Zone 32N)
+ * Nutzt den BORIS-NRW WMS GetFeatureInfo-Endpunkt.
+ * NRW bietet keinen öffentlichen WFS, nur WMS.
+ * WMS: https://www.wms.nrw.de/boris/wms_nw_brw (aktueller Jahrgang)
+ * WMS-T: https://www.wms.nrw.de/boris/wms-t_nw_brw (ab 2011)
+ * Lizenz: Datenlizenz Deutschland – Zero – Version 2.0
  */
 export declare class NRWAdapter implements BodenrichtwertAdapter {
     state: string;
     stateCode: string;
     isFallback: boolean;
-    private wfsUrl;
+    private wmsEndpoints;
+    private layerCandidates;
+    private discoveredLayers;
     getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null>;
+    private queryEndpoint;
+    /** GetCapabilities abfragen um verfügbare Layer zu finden */
+    private discoverLayers;
+    private queryWmsLayer;
+    private parseJsonResponse;
+    private parseXmlResponse;
+    private parseHtmlResponse;
+    private extractNumberFromXml;
+    private extractFieldFromXml;
     healthCheck(): Promise<boolean>;
 }
