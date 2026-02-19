@@ -3,12 +3,13 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
 /**
  * Saarland Adapter
  *
- * Nutzt den WMS GetFeatureInfo-Endpunkt über Mapbender (primär)
- * und MapServ (Fallback).
+ * Nutzt den WMS GetFeatureInfo-Endpunkt über MapServ (primär, bestätigt)
+ * und Mapbender (Fallback).
  *
- * Mapbender: https://geoportal.saarland.de/mapbender/php/wms.php (layer_id=48720)
- *   → Entdeckter Layer: BORISSL2024
  * MapServ: https://geoportal.saarland.de/gdi-sl/mapserv (BORIS map files)
+ *   → Bestätigt: steuer_boris_2022.map / Layer STEUER_BORIS / EPSG:25832
+ * Mapbender: https://geoportal.saarland.de/mapbender/php/wms.php (layer_id=48720)
+ *   → Layer BORISSL2024 (nicht queryable via GetFeatureInfo)
  *
  * HINWEIS: Der ArcGIS WFS (Boden_WFS) enthält nur Bodenkunde-Daten,
  * KEINE Bodenrichtwerte! Deshalb rein WMS-basiert.
@@ -35,22 +36,14 @@ export class SaarlandAdapter implements BodenrichtwertAdapter {
   ];
   private readonly mapservUrl = 'https://geoportal.saarland.de/gdi-sl/mapserv';
 
-  // Bekannte Layer-Kandidaten
-  private knownLayers = ['BORISSL2024', 'BORISSL2022', 'BORIS_SL', 'Bodenrichtwerte', 'bodenrichtwerte', 'BRW'];
+  // Bekannte Layer-Kandidaten (STEUER_BORIS bestätigt via Test)
+  private knownLayers = ['STEUER_BORIS', 'BORISSL2024', 'BORISSL2022', 'BORIS_SL', 'Bodenrichtwerte', 'bodenrichtwerte', 'BRW'];
 
   private discoveredMapbenderLayers: string[] | null = null;
   private discoveredMapservLayers: Record<string, string[]> = {};
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    // 1. Mapbender WMS (hat BORISSL2024 gefunden)
-    try {
-      const result = await this.queryMapbender(lat, lon);
-      if (result) return result;
-    } catch (err) {
-      console.warn('SL Mapbender error:', err);
-    }
-
-    // 2. MapServ WMS Fallback
+    // 1. MapServ WMS (bestätigt: steuer_boris_2022.map / STEUER_BORIS / EPSG:25832)
     for (const ep of this.mapservEndpoints) {
       try {
         const result = await this.queryMapserv(lat, lon, ep.map);
@@ -60,7 +53,15 @@ export class SaarlandAdapter implements BodenrichtwertAdapter {
       }
     }
 
-    console.error('SL adapter: Kein Treffer mit Mapbender und allen MapServ-Endpunkten');
+    // 2. Mapbender WMS Fallback (BORISSL2024)
+    try {
+      const result = await this.queryMapbender(lat, lon);
+      if (result) return result;
+    } catch (err) {
+      console.warn('SL Mapbender error:', err);
+    }
+
+    console.error('SL adapter: Kein Treffer mit MapServ und Mapbender');
     return null;
   }
 
