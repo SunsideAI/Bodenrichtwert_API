@@ -20,6 +20,8 @@ import { NRWAdapter } from './src/adapters/nrw.js';
 import { NiedersachsenAdapter } from './src/adapters/niedersachsen.js';
 import { RheinlandPfalzAdapter } from './src/adapters/rlp.js';
 import { BremenAdapter } from './src/adapters/bremen.js';
+import { BayernAdapter } from './src/adapters/bayern.js';
+import { SaarlandAdapter } from './src/adapters/saarland.js';
 
 // ═══════════════════════════════════════════════
 // Testfälle: Bekannte Adressen mit Koordinaten
@@ -129,6 +131,22 @@ const TEST_CASES = [
     lat: 53.0793,
     lon: 8.8017,
     adresse: 'Obernstraße 1, 28195, Bremen',
+  },
+  {
+    code: 'BY',
+    name: 'Bayern',
+    adapter: new BayernAdapter(),
+    lat: 48.1374,
+    lon: 11.5755,
+    adresse: 'Marienplatz 1, 80331, München',
+  },
+  {
+    code: 'SL',
+    name: 'Saarland',
+    adapter: new SaarlandAdapter(),
+    lat: 49.2354,
+    lon: 6.9969,
+    adresse: 'Bahnhofstraße 1, 66111, Saarbrücken',
   },
 ];
 
