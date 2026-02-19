@@ -1,0 +1,267 @@
+/**
+ * Ertragswertverfahren nach ImmoWertV 2022 §§ 27-34.
+ *
+ * Berechnet den Ertragswert (Renditewert) einer Immobilie basierend auf:
+ *   - Jahresrohertrag (Mieteinnahmen)
+ *   - Bewirtschaftungskosten (II. BV §26)
+ *   - Liegenschaftszins (BewG §256 / Gutachterausschuss)
+ *   - Vervielfältiger (Barwertfaktor)
+ *   - Bodenwert
+ *
+ * Dieses Verfahren ist besonders geeignet für:
+ *   - Mehrfamilienhäuser (MFH)
+ *   - Eigentumswohnungen (ETW) als Kapitalanlage
+ *   - Mietwohngrundstücke
+ *
+ * Quellen:
+ *   - ImmoWertV 2022, §§ 27-34: Ertragswertverfahren
+ *   - ImmoWertV 2022, Anlage 1: Vervielfältigertabelle
+ *   - BewG § 256: Liegenschaftszinssätze (gesetzlicher Fallback)
+ *   - II. BV § 26: Verwaltungskosten (Anhaltswerte)
+ */
+
+// ─── Interfaces ──────────────────────────────────────────────────────────────
+
+export interface ErtragswertInput {
+  /** Wohnfläche in m² (für Rohertrag-Berechnung aus Mietpreis/m²) */
+  wohnflaeche: number;
+  /** Monatliche Kaltmiete pro m² (aus ImmoScout-Marktdaten) */
+  mietpreisProQm: number;
+  /** Bodenwert in EUR (BRW × Grundstücksfläche) */
+  bodenwert: number;
+  /** Bodenrichtwert EUR/m² (für Liegenschaftszins-Ableitung) */
+  brwProQm: number;
+  /** Baujahr (für Bewirtschaftungskosten + RND) */
+  baujahr: number | null;
+  /** Restnutzungsdauer in Jahren (wenn bereits berechnet) */
+  restnutzungsdauer?: number;
+  /** Gebäudetyp (für Liegenschaftszins-Bestimmung) */
+  gebaeudTyp: 'mfh' | 'etw' | 'efh' | 'zfh';
+}
+
+export interface ErtragswertResult {
+  /** Ertragswert (Gesamtwert) in EUR */
+  ertragswert: number;
+  /** Gebäudeertragswert in EUR */
+  gebaeudeertragswert: number;
+  /** Jahresrohertrag (Bruttomieteinnahmen) in EUR */
+  jahresrohertrag: number;
+  /** Bewirtschaftungskosten in EUR/Jahr */
+  bewirtschaftungskosten: number;
+  /** Jahresreinertrag in EUR */
+  jahresreinertrag: number;
+  /** Verwendeter Liegenschaftszins (als Dezimalzahl) */
+  liegenschaftszins: number;
+  /** Barwertfaktor (Vervielfältiger) */
+  vervielfaeltiger: number;
+  /** Bodenwert in EUR */
+  bodenwert: number;
+  /** Hinweise zur Berechnung */
+  hinweise: string[];
+}
+
+// ─── Liegenschaftszinssätze (BewG § 256, ergänzt durch Marktbeobachtung) ────
+//
+// BewG § 256 gesetzliche Fallback-Werte:
+//   - EFH/ZFH: 2,5%
+//   - Wohnungseigentum: 3,0%
+//   - Mietwohngrundstücke (MFH): 4,0–4,5%
+//
+// Tatsächliche Zinssätze variieren stark nach Lage.
+// BRW als Proxy für Lagequalität:
+//   Hoher BRW (>200 €/m²) → niedrigerer Liegenschaftszins (teurere Lage = geringere Rendite)
+//   Niedriger BRW (<60 €/m²) → höherer Liegenschaftszins (ländlich = höhere Renditeerwartung)
+
+interface LiegenschaftszinsRange {
+  min: number;
+  max: number;
+  default: number;
+}
+
+const LIEGENSCHAFTSZINS: Record<string, LiegenschaftszinsRange> = {
+  mfh:  { min: 0.025, max: 0.065, default: 0.040 },
+  etw:  { min: 0.020, max: 0.050, default: 0.030 },
+  efh:  { min: 0.015, max: 0.040, default: 0.025 },
+  zfh:  { min: 0.020, max: 0.045, default: 0.030 },
+};
+
+/**
+ * Leitet den Liegenschaftszins aus dem BRW-Niveau ab.
+ * Höherer BRW → niedrigerer Zins (inverse Korrelation: teure Lagen = geringere Rendite).
+ */
+function deriveLiegenschaftszins(typ: string, brwProQm: number): number {
+  const range = LIEGENSCHAFTSZINS[typ] ?? LIEGENSCHAFTSZINS.mfh;
+
+  // Lineare Interpolation: BRW 0 → max, BRW 500 → min
+  const brwNorm = Math.min(Math.max(brwProQm, 0), 500) / 500;
+  const zins = range.max - brwNorm * (range.max - range.min);
+
+  // Auf 3 Dezimalstellen runden (z.B. 0.035)
+  return Math.round(zins * 1000) / 1000;
+}
+
+// ─── Bewirtschaftungskosten (II. BV § 26, ImmoWertV § 32) ──────────────────
+//
+// Komponenten:
+//   1. Verwaltungskosten: ~230 €/Wohnung/Jahr (II. BV § 26)
+//   2. Instandhaltungskosten: 7,10–11,50 €/m²/Jahr (altersabhängig)
+//   3. Mietausfallwagnis: 2% des Rohertrags
+//
+// Vereinfachung: Pauschal 20–30% des Rohertrags (marktüblich).
+
+interface Bewirtschaftungskosten {
+  verwaltung: number;
+  instandhaltung: number;
+  mietausfallwagnis: number;
+  gesamt: number;
+}
+
+function calcBewirtschaftungskosten(
+  wohnflaeche: number,
+  jahresrohertrag: number,
+  baujahr: number | null,
+): Bewirtschaftungskosten {
+  const currentYear = new Date().getFullYear();
+  const alter = baujahr != null ? currentYear - baujahr : 30;
+
+  // Verwaltungskosten: 230 €/Wohnung/Jahr (Proxy: 1 Wohnung pro 80m² Wohnfläche)
+  const anzahlWE = Math.max(1, Math.round(wohnflaeche / 80));
+  const verwaltung = anzahlWE * 230;
+
+  // Instandhaltungskosten (II. BV altersabhängig)
+  let ihkProQm: number;
+  if (alter < 22) ihkProQm = 7.10;
+  else if (alter < 32) ihkProQm = 9.00;
+  else ihkProQm = 11.50;
+  const instandhaltung = Math.round(wohnflaeche * ihkProQm);
+
+  // Mietausfallwagnis: 2% des Rohertrags
+  const mietausfallwagnis = Math.round(jahresrohertrag * 0.02);
+
+  return {
+    verwaltung,
+    instandhaltung,
+    mietausfallwagnis,
+    gesamt: verwaltung + instandhaltung + mietausfallwagnis,
+  };
+}
+
+// ─── Vervielfältiger (Barwertfaktor, ImmoWertV Anlage 1) ───────────────────
+
+/**
+ * Berechnet den Vervielfältiger (Barwertfaktor) nach ImmoWertV Anlage 1.
+ *
+ * V = ((1+i)^n - 1) / ((1+i)^n × i)
+ *
+ * @param liegenschaftszins - Zinssatz als Dezimalzahl (z.B. 0.04 = 4%)
+ * @param restnutzungsdauer - Restnutzungsdauer in Jahren
+ */
+function calcVervielfaeltiger(liegenschaftszins: number, restnutzungsdauer: number): number {
+  if (liegenschaftszins <= 0 || restnutzungsdauer <= 0) return 0;
+
+  const i = liegenschaftszins;
+  const n = restnutzungsdauer;
+  const qn = Math.pow(1 + i, n);
+
+  return (qn - 1) / (qn * i);
+}
+
+// ─── Hauptfunktion ──────────────────────────────────────────────────────────
+
+/**
+ * Berechnet den Ertragswert nach ImmoWertV 2022 §§ 27-34 (allgemeines Verfahren).
+ *
+ * Formel:
+ *   Ertragswert = Gebäudeertragswert + Bodenwert
+ *   Gebäudeertragswert = (Reinertrag - Bodenwertverzinsung) × Vervielfältiger
+ *   Reinertrag = Rohertrag - Bewirtschaftungskosten
+ *
+ * @param input - Eingabeparameter für die Ertragswertberechnung
+ * @returns ErtragswertResult oder null wenn Berechnung nicht möglich
+ */
+export function calcErtragswert(input: ErtragswertInput): ErtragswertResult | null {
+  const { wohnflaeche, mietpreisProQm, bodenwert, brwProQm, baujahr, gebaeudTyp } = input;
+
+  // Gate: Wir brauchen Mietpreis, Wohnfläche und Bodenwert
+  if (!mietpreisProQm || mietpreisProQm <= 0) return null;
+  if (!wohnflaeche || wohnflaeche <= 0) return null;
+  if (bodenwert <= 0) return null;
+
+  const hinweise: string[] = [];
+
+  // 1. Jahresrohertrag (monatliche Kaltmiete × 12)
+  const jahresrohertrag = Math.round(wohnflaeche * mietpreisProQm * 12);
+
+  // 2. Bewirtschaftungskosten
+  const bwk = calcBewirtschaftungskosten(wohnflaeche, jahresrohertrag, baujahr);
+  const bwkAnteil = ((bwk.gesamt / jahresrohertrag) * 100).toFixed(1);
+
+  // 3. Jahresreinertrag
+  const jahresreinertrag = jahresrohertrag - bwk.gesamt;
+  if (jahresreinertrag <= 0) {
+    hinweise.push('Reinertrag negativ. Bewirtschaftungskosten übersteigen Mieteinnahmen.');
+    return null;
+  }
+
+  // 4. Liegenschaftszins
+  const liegenschaftszins = deriveLiegenschaftszins(gebaeudTyp, brwProQm);
+
+  // 5. Bodenwertverzinsung
+  const bodenwertverzinsung = bodenwert * liegenschaftszins;
+
+  // 6. Gebäudereinertrag
+  const gebaeudereinertrag = jahresreinertrag - bodenwertverzinsung;
+
+  // 7. Restnutzungsdauer
+  const rnd = input.restnutzungsdauer ?? estimateRND(baujahr, gebaeudTyp);
+
+  // 8. Vervielfältiger
+  const vervielfaeltiger = calcVervielfaeltiger(liegenschaftszins, rnd);
+
+  // 9. Gebäudeertragswert
+  const gebaeudeertragswert = Math.round(Math.max(0, gebaeudereinertrag * vervielfaeltiger));
+
+  // 10. Ertragswert
+  const ertragswert = gebaeudeertragswert + bodenwert;
+
+  // Hinweise
+  hinweise.push(
+    `Ertragswert: ${jahresrohertrag.toLocaleString('de-DE')} € Rohertrag - ${bwk.gesamt.toLocaleString('de-DE')} € BWK (${bwkAnteil}%) = ${jahresreinertrag.toLocaleString('de-DE')} € Reinertrag.`,
+  );
+  hinweise.push(
+    `Liegenschaftszins ${(liegenschaftszins * 100).toFixed(1)}% (BRW ${brwProQm} €/m²), Vervielfältiger ${vervielfaeltiger.toFixed(2)} (RND ${rnd} J.).`,
+  );
+
+  if (gebaeudereinertrag < 0) {
+    hinweise.push(
+      'Bodenwertverzinsung übersteigt Reinertrag. Gebäudeertragswert auf 0 gesetzt.',
+    );
+  }
+
+  return {
+    ertragswert,
+    gebaeudeertragswert,
+    jahresrohertrag,
+    bewirtschaftungskosten: bwk.gesamt,
+    jahresreinertrag,
+    liegenschaftszins,
+    vervielfaeltiger: Math.round(vervielfaeltiger * 100) / 100,
+    bodenwert,
+    hinweise,
+  };
+}
+
+// ─── Hilfsfunktionen ────────────────────────────────────────────────────────
+
+/**
+ * Schätzt die Restnutzungsdauer basierend auf Baujahr und Gebäudetyp.
+ * Fallback wenn keine explizite RND übergeben wird.
+ */
+function estimateRND(baujahr: number | null, typ: string): number {
+  const currentYear = new Date().getFullYear();
+  const alter = baujahr != null ? currentYear - baujahr : 30;
+
+  // GND nach Typ (vereinfacht, mittlere Standardstufe)
+  const gnd = typ === 'mfh' || typ === 'etw' ? 60 : 70;
+  return Math.max(5, gnd - alter); // Minimum 5 Jahre
+}

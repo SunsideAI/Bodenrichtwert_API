@@ -13,5 +13,10 @@ export declare class ThueringenAdapter implements BodenrichtwertAdapter {
     isFallback: boolean;
     private wfsUrl;
     getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null>;
+    private tryJsonQuery;
+    private tryGmlQuery;
+    private extractFromFeatures;
+    private extractGmlValue;
+    private extractGmlField;
     healthCheck(): Promise<boolean>;
 }

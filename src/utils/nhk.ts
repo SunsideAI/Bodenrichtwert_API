@@ -3,14 +3,17 @@
  *
  * Berechnet den Gebäude-Herstellungswert basierend auf:
  *   - NHK 2010 Kostenkennwerten (EUR/m² BGF, Preisstand 2010)
- *   - Baupreisindex-Anpassung (2010 → aktuell)
+ *   - Baupreisindex-Anpassung (2010 → aktuell) — automatisch via Destatis oder Fallback
+ *   - Gesamtnutzungsdauer differenziert nach Gebäudetyp und Standardstufe (ImmoWertV 2022 Anlage 1)
  *   - Lineare Alterswertminderung (SW-RL §8)
+ *   - Marktanpassungsfaktor (Sachwertfaktor) nach Anlage 25 BewG
  *
  * Quellen:
  *   - ImmoWertV 2022, Anlage 4: Kostenkennwerte nach Gebäudeart und Standardstufe
- *   - SW-RL Anlage 3: Gesamtnutzungsdauer (60–80 Jahre für Wohngebäude)
+ *   - ImmoWertV 2022, Anlage 1: Gesamtnutzungsdauer (standardabhängig)
  *   - SW-RL Anlage 4: Restnutzungsdauer-Modifikation bei Modernisierung
- *   - Destatis: Baupreisindex für Wohngebäude (Basis 2015=100)
+ *   - Anlage 25 BewG (JStG 2022): Wertzahlen (Sachwertfaktoren) als MAF-Fallback
+ *   - Destatis Tabelle 61261-0002: Baupreisindex für Wohngebäude (Basis 2015=100)
  */
 
 // ─── Typen ───────────────────────────────────────────────────────────────────
@@ -29,12 +32,16 @@ export type Standardstufe = 1 | 2 | 3 | 4 | 5;
 
 export interface NHKResult {
   gebaeudewert: number;
+  /** Gebäudewert vor Marktanpassung */
+  gebaeudewert_vor_maf: number;
   nhk_2010_pro_qm_bgf: number;
   bgf_geschaetzt: number;
   baupreisindex_faktor: number;
+  baupreisindex_quelle: string;
   alterswertminderung: number;
   gesamtnutzungsdauer: number;
   restnutzungsdauer: number;
+  marktanpassungsfaktor: number;
   hinweise: string[];
 }
 
@@ -71,16 +78,20 @@ const NHK_2010: Record<GebaeudTyp, Record<Standardstufe, number>> = {
   etw:             { 1: 490, 2: 545, 3: 625, 4: 755, 5: 945 },
 };
 
-// ─── Gesamtnutzungsdauer (SW-RL Anlage 3) ────────────────────────────────────
+// ─── Gesamtnutzungsdauer (ImmoWertV 2022 Anlage 1) ─────────────────────────
+//
+// Differenziert nach Gebäudetyp UND Standardstufe.
+// EFH/ZFH/DHH/Reihen: 60-80 Jahre (S1=60, S2=65, S3=70, S4=75, S5=80)
+// MFH/ETW: 50-80 Jahre (S1=50, S2=55, S3=60, S4=70, S5=80)
 
-const GESAMTNUTZUNGSDAUER: Record<GebaeudTyp, number> = {
-  efh_freistehend: 80,
-  dhh: 80,
-  reihenend: 80,
-  reihenmittel: 80,
-  zfh: 80,
-  mfh: 80,
-  etw: 80,
+const GESAMTNUTZUNGSDAUER: Record<GebaeudTyp, Record<Standardstufe, number>> = {
+  efh_freistehend: { 1: 60, 2: 65, 3: 70, 4: 75, 5: 80 },
+  dhh:             { 1: 60, 2: 65, 3: 70, 4: 75, 5: 80 },
+  reihenend:       { 1: 60, 2: 65, 3: 70, 4: 75, 5: 80 },
+  reihenmittel:    { 1: 60, 2: 65, 3: 70, 4: 75, 5: 80 },
+  zfh:             { 1: 60, 2: 65, 3: 70, 4: 75, 5: 80 },
+  mfh:             { 1: 50, 2: 55, 3: 60, 4: 70, 5: 80 },
+  etw:             { 1: 50, 2: 55, 3: 60, 4: 70, 5: 80 },
 };
 
 // ─── BGF-Schätzung (Wohnfläche → Brutto-Grundfläche) ────────────────────────
@@ -101,15 +112,61 @@ const BGF_FAKTOR: Record<GebaeudTyp, number> = {
   etw: 1.25,
 };
 
-// ─── Baupreisindex (Destatis, Wohngebäude, Basis 2015=100) ───────────────────
+// ─── Baupreisindex Fallback (Destatis, Wohngebäude, Basis 2015=100) ─────────
 //
-// Quelle: Statistisches Bundesamt, Baureihe 441
+// Quelle: Statistisches Bundesamt, Tabelle 61261-0002
 // Der Index wird quartalsweise veröffentlicht.
-// TODO: Könnte per Destatis Genesis API automatisch aktualisiert werden.
+// Diese Werte werden nur verwendet wenn der automatische Abruf fehlschlägt.
 
-const BAUPREISINDEX_2010 = 90.4;      // Jahresdurchschnitt 2010
-const BAUPREISINDEX_AKTUELL = 168.2;   // Q3/2025 (letzte Aktualisierung)
-const BAUPREISINDEX_STAND = '2025-Q3';
+const FALLBACK_BPI_2010 = 90.4;       // Jahresdurchschnitt 2010
+const FALLBACK_BPI_AKTUELL = 168.2;    // Q3/2025 (letzte manuelle Aktualisierung)
+const FALLBACK_BPI_STAND = '2025-Q3';
+
+// ─── Marktanpassungsfaktoren (Anlage 25 BewG, JStG 2022) ───────────────────
+//
+// Wertzahlen nach vorlaeufigem Sachwert und BRW-Niveau.
+// Diese Tabelle ist eine vereinfachte Approximation der Anlage 25 BewG.
+// Spanne: 0.8 bis 1.8 (neue Fassung seit JStG 2022).
+
+interface MAFTableEntry {
+  /** Obergrenze vorlaeufiger Sachwert */
+  sachwertBis: number;
+  /** MAF nach BRW-Niveau [≤30, ≤60, ≤120, ≤180, >180] */
+  faktoren: [number, number, number, number, number];
+}
+
+const MAF_TABLE: MAFTableEntry[] = [
+  { sachwertBis:   50000, faktoren: [1.4, 1.5, 1.6, 1.7, 1.8] },
+  { sachwertBis:  100000, faktoren: [1.2, 1.3, 1.4, 1.5, 1.6] },
+  { sachwertBis:  150000, faktoren: [1.1, 1.2, 1.3, 1.4, 1.5] },
+  { sachwertBis:  200000, faktoren: [1.0, 1.1, 1.2, 1.3, 1.4] },
+  { sachwertBis:  300000, faktoren: [0.9, 1.0, 1.1, 1.2, 1.3] },
+  { sachwertBis:  400000, faktoren: [0.85, 0.95, 1.05, 1.15, 1.25] },
+  { sachwertBis:  500000, faktoren: [0.8, 0.9, 1.0, 1.1, 1.2] },
+  { sachwertBis: Infinity, faktoren: [0.8, 0.85, 0.95, 1.05, 1.15] },
+];
+
+/**
+ * Bestimmt den Marktanpassungsfaktor (Sachwertfaktor) anhand des
+ * vorlaeufigen Sachwerts und des BRW-Niveaus.
+ *
+ * Basis: Anlage 25 BewG (vereinfachte Approximation).
+ */
+export function lookupMAF(vorlaeufigSachwert: number, brwProQm: number): number {
+  // BRW-Niveau-Index: [≤30, ≤60, ≤120, ≤180, >180]
+  let brwIdx: number;
+  if (brwProQm <= 30) brwIdx = 0;
+  else if (brwProQm <= 60) brwIdx = 1;
+  else if (brwProQm <= 120) brwIdx = 2;
+  else if (brwProQm <= 180) brwIdx = 3;
+  else brwIdx = 4;
+
+  // Sachwert-Zeile finden
+  const row = MAF_TABLE.find((r) => vorlaeufigSachwert <= r.sachwertBis)
+    ?? MAF_TABLE[MAF_TABLE.length - 1];
+
+  return row.faktoren[brwIdx];
+}
 
 // ─── Mapping-Funktionen ──────────────────────────────────────────────────────
 
@@ -117,7 +174,7 @@ const BAUPREISINDEX_STAND = '2025-Q3';
  * Mappt objektunterart-String auf GebaeudTyp.
  * Gleiche Logik wie calcObjektunterartFaktor in bewertung.ts.
  */
-function mapObjektunterart(
+export function mapObjektunterart(
   objektunterart: string | null,
   istHaus: boolean,
 ): GebaeudTyp {
@@ -140,7 +197,7 @@ function mapObjektunterart(
 /**
  * Mappt ausstattung-String oder Score auf Standardstufe (1–5).
  */
-function mapAusstattung(ausstattung: string | null): Standardstufe {
+export function mapAusstattung(ausstattung: string | null): Standardstufe {
   if (!ausstattung) return 3; // Default: mittel
 
   // Numerischer Score
@@ -207,7 +264,7 @@ function calcModifizierteRestnutzungsdauer(
 /**
  * Berechnet den Gebäude-Herstellungswert nach NHK 2010.
  *
- * Formel: Gebäudewert = NHK_2010 × BGF × (BPI_aktuell / BPI_2010) × (RND / GND)
+ * Formel: Gebäudewert = NHK_2010 × BGF × BPI-Faktor × (RND / GND) × MAF
  *
  * @param wohnflaeche - Wohnfläche in m²
  * @param baujahr - Baujahr (null → Default 30 Jahre Alter)
@@ -215,6 +272,8 @@ function calcModifizierteRestnutzungsdauer(
  * @param ausstattung - Ausstattungsniveau (Score 1–5 oder Text)
  * @param modernisierung - Modernisierungsgrad (Score 1–5 oder Text)
  * @param istHaus - true = Haus, false = Wohnung (Default: true)
+ * @param brwProQm - Bodenrichtwert EUR/m² (für MAF-Bestimmung, Default: 100)
+ * @param externalBpi - Externer Baupreisindex {aktuell, basis_2010, stand, quelle} (falls verfügbar)
  */
 export function calcGebaeudewertNHK(
   wohnflaeche: number,
@@ -223,6 +282,8 @@ export function calcGebaeudewertNHK(
   ausstattung: string | null,
   modernisierung: string | null,
   istHaus: boolean = true,
+  brwProQm: number = 100,
+  externalBpi?: { aktuell: number; basis_2010: number; stand: string; quelle: string } | null,
 ): NHKResult {
   const hinweise: string[] = [];
 
@@ -238,10 +299,14 @@ export function calcGebaeudewertNHK(
   const bgf = Math.round(wohnflaeche * bgfFaktor);
 
   // 4. Baupreisindex-Anpassung (2010 → aktuell)
-  const bpiFaktor = BAUPREISINDEX_AKTUELL / BAUPREISINDEX_2010;
+  const bpiAktuell = externalBpi?.aktuell ?? FALLBACK_BPI_AKTUELL;
+  const bpi2010 = externalBpi?.basis_2010 ?? FALLBACK_BPI_2010;
+  const bpiStand = externalBpi?.stand ?? FALLBACK_BPI_STAND;
+  const bpiQuelle = externalBpi?.quelle ?? 'Fallback (hardcoded)';
+  const bpiFaktor = bpiAktuell / bpi2010;
 
-  // 5. Alterswertminderung (linear)
-  const gnd = GESAMTNUTZUNGSDAUER[typ];
+  // 5. Gesamtnutzungsdauer (differenziert nach Typ + Stufe)
+  const gnd = GESAMTNUTZUNGSDAUER[typ][stufe];
   const currentYear = new Date().getFullYear();
   const gebaeudealter = baujahr != null
     ? currentYear - baujahr
@@ -256,11 +321,15 @@ export function calcGebaeudewertNHK(
   const rnd = calcModifizierteRestnutzungsdauer(basisRND, gnd, modernisierung);
   const alterswertminderung = gnd > 0 ? rnd / gnd : 0;
 
-  // 6. Gebäudewert berechnen
+  // 6. Vorlaeufiger Sachwert (vor MAF)
   const herstellungskosten = nhk2010 * bgf * bpiFaktor;
-  const gebaeudewert = Math.round(herstellungskosten * alterswertminderung);
+  const gebaeudewertVorMAF = Math.round(herstellungskosten * alterswertminderung);
 
-  // 7. Hinweise
+  // 7. Marktanpassungsfaktor (Anlage 25 BewG)
+  const maf = lookupMAF(gebaeudewertVorMAF, brwProQm);
+  const gebaeudewert = Math.round(gebaeudewertVorMAF * maf);
+
+  // 8. Hinweise
   if (gebaeudealter > gnd) {
     hinweise.push(
       `Gebäudealter (${gebaeudealter} J.) übersteigt Gesamtnutzungsdauer (${gnd} J.). Gebäudewert auf Restwert reduziert.`,
@@ -271,18 +340,26 @@ export function calcGebaeudewertNHK(
       `Modernisierung verlängert Restnutzungsdauer von ${basisRND} auf ${rnd} Jahre.`,
     );
   }
+  if (maf !== 1.0) {
+    hinweise.push(
+      `Marktanpassungsfaktor ${maf.toFixed(2)} angewandt (Anlage 25 BewG, BRW ${brwProQm} €/m²).`,
+    );
+  }
   hinweise.push(
-    `NHK-Berechnung: ${nhk2010} €/m² BGF × ${bgf} m² BGF × ${bpiFaktor.toFixed(2)} (BPI) × ${(alterswertminderung * 100).toFixed(0)}% (RND/GND) = ${gebaeudewert.toLocaleString('de-DE')} € (Stand ${BAUPREISINDEX_STAND}).`,
+    `NHK-Berechnung: ${nhk2010} €/m² BGF × ${bgf} m² BGF × ${bpiFaktor.toFixed(2)} (BPI ${bpiStand}) × ${(alterswertminderung * 100).toFixed(0)}% (RND ${rnd}/${gnd} J.) × ${maf.toFixed(2)} (MAF) = ${gebaeudewert.toLocaleString('de-DE')} € [GND=${gnd}J, BPI: ${bpiQuelle}].`,
   );
 
   return {
     gebaeudewert: Math.max(0, gebaeudewert),
+    gebaeudewert_vor_maf: Math.max(0, gebaeudewertVorMAF),
     nhk_2010_pro_qm_bgf: nhk2010,
     bgf_geschaetzt: bgf,
     baupreisindex_faktor: Math.round(bpiFaktor * 100) / 100,
+    baupreisindex_quelle: bpiQuelle,
     alterswertminderung: Math.round(alterswertminderung * 100) / 100,
     gesamtnutzungsdauer: gnd,
     restnutzungsdauer: rnd,
+    marktanpassungsfaktor: maf,
     hinweise,
   };
 }

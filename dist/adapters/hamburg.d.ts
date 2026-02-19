@@ -11,12 +11,34 @@ export declare class HamburgAdapter implements BodenrichtwertAdapter {
     stateCode: string;
     isFallback: boolean;
     private wfsUrl;
+    private uekWfsUrl;
+    private uekWmsUrl;
     private discoveredTypeName;
+    private readonly fallbackTypeNames;
     getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null>;
-    private tryJsonQuery;
-    private tryGmlQuery;
-    /** Ermittelt den FeatureType-Namen via GetCapabilities */
-    private getTypeName;
+    /**
+     * Build multiple bbox strings to work around CRS and axis order issues.
+     * Hamburg's deegree WFS uses EPSG:25832 (UTM Zone 32N) natively.
+     * EPSG:4326 queries return 0 features, so we convert to UTM first.
+     */
+    private buildBboxStrategies;
+    /**
+     * Convert WGS84 lat/lon to UTM Zone 32N (EPSG:25832).
+     * Standard Transverse Mercator projection formulas.
+     */
+    private wgs84ToUtm32;
+    private tryWfsGml;
+    /**
+     * WMS GetFeatureInfo fallback.
+     * Hamburg also has a WMS endpoint with different layer names.
+     */
+    private tryWmsQuery;
+    /**
+     * Extract BRW value from HTML table response.
+     */
+    private extractHtmlBrw;
+    /** Ermittelt alle FeatureType-Namen via GetCapabilities, priorisiert */
+    private getTypeNames;
     private extractGmlValue;
     private extractGmlField;
     healthCheck(): Promise<boolean>;

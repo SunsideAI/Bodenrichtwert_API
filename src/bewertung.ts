@@ -3,8 +3,13 @@
  *
  * Berechnet Immobilienwerte anhand von:
  *   - Bodenrichtwert (offiziell oder geschätzt)
- *   - ImmoScout-Marktpreise (Stadtdurchschnitt)
+ *   - ImmoScout-Marktpreise (Stadt- oder Stadtteil-Durchschnitt)
+ *   - NHK 2010 Gebäudewert (ImmoWertV 2022 Anlage 4, mit MAF nach Anlage 25 BewG)
+ *   - Ertragswertverfahren (ImmoWertV §§ 27-34) für MFH/Mietobjekte
  *   - Korrekturfaktoren (Baujahr, Modernisierung, Energie, Ausstattung, Objektunterart)
+ *   - Baupreisindex (automatisch via Destatis Genesis API)
+ *   - Bundesbank Wohnimmobilienpreisindex (Stichtag-Korrektur)
+ *   - BORIS-NRW Immobilienrichtwerte (Cross-Validation)
  *
  * Ersetzt den bisherigen Zapier-JavaScript-Code + LLM "Sophia".
  */
@@ -15,6 +20,8 @@ import type { PreisindexEntry } from './utils/bundesbank.js';
 import { calcIndexKorrektur } from './utils/bundesbank.js';
 import { calcGebaeudewertNHK } from './utils/nhk.js';
 import type { NRWImmobilienrichtwert } from './utils/nrw-irw.js';
+import { calcErtragswert } from './utils/ertragswert.js';
+import type { BaupreisindexResult } from './utils/destatis.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -48,6 +55,8 @@ export interface Bewertung {
   immobilienwert_spanne: { min: number; max: number };
   bodenwert: number;
   gebaeudewert: number;
+  /** Ertragswert (nur bei MFH/ETW mit Mietdaten) */
+  ertragswert: number | null;
   bewertungsmethode: 'sachwert-lite' | 'marktpreis-indikation';
   konfidenz: 'hoch' | 'mittel' | 'gering';
   faktoren: BewertungFaktoren;
@@ -198,6 +207,69 @@ function calcStichtagKorrektur(
   return Math.round(diffYears - 2) * 0.025;
 }
 
+// ─── Fallback-Konstanten ─────────────────────────────────────────────────────
+
+/** Bundesdurchschnitt qm-Preise (konservativ, Stand 2024/2025) */
+const NATIONAL_AVG_QM_PREIS = { haus: 2200, wohnung: 2800 } as const;
+
+/** Typische Wohnflächen nach Immobilienart (m²) */
+const DEFAULT_WOHNFLAECHE: Record<string, number> = {
+  efh: 130, zfh: 160, mfh: 300, etw: 75, dhh: 120, rmh: 110, reh: 115,
+};
+
+/**
+ * Schätzt die Wohnfläche wenn nicht angegeben.
+ * Priorität: grundfläche-basiert > art-basiert > pauschaler Default.
+ */
+function estimateWohnflaeche(
+  input: BewertungInput,
+): { wohnflaeche: number; hinweis: string } {
+  const istHaus = !input.art?.toLowerCase().includes('wohnung');
+
+  // Aus Grundstücksfläche ableiten
+  if (input.grundstuecksflaeche && input.grundstuecksflaeche > 0) {
+    const faktor = istHaus ? 0.4 : 0.8;
+    const wf = Math.round(input.grundstuecksflaeche * faktor);
+    return {
+      wohnflaeche: Math.max(wf, 30),
+      hinweis: `Wohnfläche geschätzt (${wf} m² aus Grundstücksfläche × ${faktor}). Bitte exakte Wohnfläche angeben für präzisere Bewertung.`,
+    };
+  }
+
+  // Aus Objektunterart / Art ableiten
+  const art = (input.art ?? '').toLowerCase();
+  const o = (input.objektunterart ?? '').toLowerCase();
+  let key = 'efh'; // Default
+  if (art.includes('wohnung') || o.includes('etw') || o.includes('eigentum')) key = 'etw';
+  else if (o.includes('mehrfamilien') || o.includes('mfh')) key = 'mfh';
+  else if (o.includes('zweifamilien') || o.includes('zfh')) key = 'zfh';
+  else if (o.includes('doppelhaush') || o.includes('dhh')) key = 'dhh';
+  else if (o.includes('reihenmittel') || o.includes('rmh')) key = 'rmh';
+  else if (o.includes('reihenend') || o.includes('reh')) key = 'reh';
+
+  const wf = DEFAULT_WOHNFLAECHE[key] ?? 120;
+  return {
+    wohnflaeche: wf,
+    hinweis: `Wohnfläche geschätzt (${wf} m² basierend auf Immobilientyp). Bitte exakte Wohnfläche angeben für präzisere Bewertung.`,
+  };
+}
+
+/**
+ * Schätzt die Grundstücksfläche wenn nicht angegeben.
+ * Häuser: Wohnfläche × 3, Wohnungen: Wohnfläche × 0.5 (Miteigentumsanteil).
+ */
+function estimateGrundstuecksflaeche(
+  wohnflaeche: number,
+  istHaus: boolean,
+): { grundflaeche: number; hinweis: string } {
+  const faktor = istHaus ? 3 : 0.5;
+  const gf = Math.round(wohnflaeche * faktor);
+  return {
+    grundflaeche: Math.max(gf, 50),
+    hinweis: `Grundstücksfläche geschätzt (${gf} m² aus Wohnfläche × ${faktor}). Bitte exakte Grundstücksfläche angeben.`,
+  };
+}
+
 // ─── Hilfsfunktionen ─────────────────────────────────────────────────────────
 
 function selectMarktpreis(marktdaten: ImmoScoutPrices | null, istHaus: boolean): number | null {
@@ -208,9 +280,31 @@ function selectMarktpreis(marktdaten: ImmoScoutPrices | null, istHaus: boolean):
   return marktdaten.wohnung_kauf_preis ?? marktdaten.haus_kauf_preis;
 }
 
+function selectMietpreis(marktdaten: ImmoScoutPrices | null, istHaus: boolean): number | null {
+  if (!marktdaten) return null;
+  if (istHaus) {
+    return marktdaten.haus_miete_preis ?? marktdaten.wohnung_miete_preis;
+  }
+  return marktdaten.wohnung_miete_preis ?? marktdaten.haus_miete_preis;
+}
+
+/**
+ * Bestimmt den Gebäudetyp für das Ertragswertverfahren.
+ */
+function mapToErtragswertTyp(art: string | null, objektunterart: string | null): 'mfh' | 'etw' | 'efh' | 'zfh' {
+  const a = (art ?? '').toLowerCase();
+  const o = (objektunterart ?? '').toLowerCase();
+
+  if (a.includes('wohnung') || o.includes('etw') || o.includes('eigentum')) return 'etw';
+  if (o.includes('mehrfamilien') || o.includes('mfh')) return 'mfh';
+  if (o.includes('zweifamilien') || o.includes('zfh')) return 'zfh';
+  return 'efh';
+}
+
 function determineConfidenceAndSpread(
   brw: NormalizedBRW | null,
   methode: 'sachwert-lite' | 'marktpreis-indikation',
+  hasErtragswert: boolean,
 ): { konfidenz: 'hoch' | 'mittel' | 'gering'; spread: number } {
   // Marktpreis-Indikation: basiert auf Stadtdurchschnitt → inhärente Unsicherheit ±15%
   // BRW-Qualität ist irrelevant, da der BRW nicht in die Berechnung eingeht
@@ -220,7 +314,11 @@ function determineConfidenceAndSpread(
   // Sachwert-lite: BRW-Qualität bestimmt die Konfidenz
   if (!brw || brw.wert <= 0) return { konfidenz: 'gering', spread: 0.20 };
   if (brw.schaetzung)         return { konfidenz: 'mittel', spread: 0.15 };
-  return                              { konfidenz: 'hoch',   spread: 0.08 };
+
+  // Ertragswert als Cross-Validation erhöht die Konfidenz weiter
+  if (hasErtragswert) return { konfidenz: 'hoch', spread: 0.06 };
+
+  return { konfidenz: 'hoch', spread: 0.08 };
 }
 
 // ─── Hauptfunktion ───────────────────────────────────────────────────────────
@@ -231,12 +329,21 @@ export function buildBewertung(
   marktdaten: ImmoScoutPrices | null,
   preisindex?: PreisindexEntry[] | null,
   irw?: NRWImmobilienrichtwert | null,
-): Bewertung | null {
-  // Gate: Wohnfläche ist Pflicht
-  if (!input.wohnflaeche || input.wohnflaeche <= 0) return null;
+  baupreisindex?: BaupreisindexResult | null,
+): Bewertung {
+  // ─── Wohnfläche Fallback ────────────────────────────────────────────────────
+  const validationHinweise: string[] = [];
+  let wohnflaeche = input.wohnflaeche ?? 0;
+  let wohnflaecheGeschaetzt = false;
+
+  if (!wohnflaeche || wohnflaeche <= 0) {
+    const est = estimateWohnflaeche(input);
+    wohnflaeche = est.wohnflaeche;
+    wohnflaecheGeschaetzt = true;
+    validationHinweise.push(est.hinweis);
+  }
 
   // ─── Input-Plausibilitätsprüfung ────────────────────────────────────────────
-  const validationHinweise: string[] = [];
   const currentYear = new Date().getFullYear();
 
   if (input.baujahr != null && (input.baujahr < 1800 || input.baujahr > currentYear + 5)) {
@@ -244,14 +351,14 @@ export function buildBewertung(
       `Baujahr ${input.baujahr} liegt außerhalb des plausiblen Bereichs (1800–${currentYear + 5}). Ergebnis möglicherweise unzuverlässig.`,
     );
   }
-  if (input.wohnflaeche < 15) {
+  if (wohnflaeche < 15 && !wohnflaecheGeschaetzt) {
     validationHinweise.push(
-      `Wohnfläche ${input.wohnflaeche} m² ist ungewöhnlich klein. Ergebnis möglicherweise unzuverlässig.`,
+      `Wohnfläche ${wohnflaeche} m² ist ungewöhnlich klein. Ergebnis möglicherweise unzuverlässig.`,
     );
   }
-  if (input.wohnflaeche > 2000) {
+  if (wohnflaeche > 2000) {
     validationHinweise.push(
-      `Wohnfläche ${input.wohnflaeche} m² ist ungewöhnlich groß. Ergebnis möglicherweise unzuverlässig.`,
+      `Wohnfläche ${wohnflaeche} m² ist ungewöhnlich groß. Ergebnis möglicherweise unzuverlässig.`,
     );
   }
   if (input.grundstuecksflaeche != null && input.grundstuecksflaeche > 50000) {
@@ -262,9 +369,11 @@ export function buildBewertung(
 
   const istHaus = !input.art?.toLowerCase().includes('wohnung');
   const marktPreisProQm = selectMarktpreis(marktdaten, istHaus);
+  const mietPreisProQm = selectMietpreis(marktdaten, istHaus);
 
-  // Gate: mindestens eine Datenquelle nötig
-  if (!marktPreisProQm && (!brw || brw.wert <= 0)) return null;
+  // ─── Grundfläche: verwende Original oder schätze ────────────────────────────
+  let grundflaeche = input.grundstuecksflaeche || 0;
+  let grundflaecheGeschaetzt = false;
 
   // Faktoren berechnen
   const faktoren: BewertungFaktoren = {
@@ -292,13 +401,23 @@ export function buildBewertung(
 
   // Methode bestimmen
   const hasBRW = brw != null && brw.wert > 0;
-  const grundflaeche = input.grundstuecksflaeche || 0;
+
+  // Wenn BRW vorhanden aber keine Grundfläche → Grundfläche schätzen, damit Sachwert-lite möglich
+  if (hasBRW && grundflaeche <= 0) {
+    const est = estimateGrundstuecksflaeche(wohnflaeche, istHaus);
+    grundflaeche = est.grundflaeche;
+    grundflaecheGeschaetzt = true;
+    validationHinweise.push(est.hinweis);
+  }
+
+  // Bewertungsmethode: Sachwert-lite wenn BRW + Grundfläche, sonst Marktpreis-Indikation/Fallback
   const bewertungsmethode: 'sachwert-lite' | 'marktpreis-indikation' =
     hasBRW && grundflaeche > 0 ? 'sachwert-lite' : 'marktpreis-indikation';
 
   let bodenwert = 0;
   let gebaeudewert = 0;
   let realistischerImmobilienwert = 0;
+  let ertragswertErgebnis: number | null = null;
   const hinweise: string[] = [...validationHinweise];
   const datenquellen: string[] = [];
 
@@ -324,7 +443,7 @@ export function buildBewertung(
     bodenwert = Math.round(brwKorrigiert * grundflaeche);
 
     if (marktPreisProQm) {
-      const marktGesamt = marktPreisProQm * input.wohnflaeche * (1 + faktoren.gesamt);
+      const marktGesamt = marktPreisProQm * wohnflaeche * (1 + faktoren.gesamt);
       gebaeudewert = Math.round(Math.max(0, marktGesamt - bodenwert));
       if (marktGesamt - bodenwert < 0) {
         hinweise.push(
@@ -333,15 +452,24 @@ export function buildBewertung(
       }
       datenquellen.push('BORIS/WFS Bodenrichtwert', 'ImmoScout24 Atlas Marktpreise');
     } else {
-      // Kein Marktpreis: Gebäudewert über NHK 2010 berechnen (ImmoWertV Anlage 4)
-      const istHaus = !input.art?.toLowerCase().includes('wohnung');
+      // Kein Marktpreis: Gebäudewert über NHK 2010 berechnen (ImmoWertV Anlage 4 + MAF)
+      const externalBpi = baupreisindex ? {
+        aktuell: baupreisindex.aktuell,
+        basis_2010: baupreisindex.basis_2010,
+        stand: baupreisindex.stand,
+        quelle: baupreisindex.quelle,
+      } : null;
+
       const nhk = calcGebaeudewertNHK(
-        input.wohnflaeche, input.baujahr,
+        wohnflaeche, input.baujahr,
         input.objektunterart, input.ausstattung, input.modernisierung,
-        istHaus,
+        istHaus, brw!.wert, externalBpi,
       );
       gebaeudewert = nhk.gebaeudewert;
       datenquellen.push('BORIS/WFS Bodenrichtwert', 'NHK 2010 (ImmoWertV 2022)');
+      if (baupreisindex?.quelle === 'Destatis Genesis 61261-0002') {
+        datenquellen.push('Destatis Baupreisindex');
+      }
       hinweise.push(...nhk.hinweise);
     }
 
@@ -359,32 +487,91 @@ export function buildBewertung(
         datenquellen.push('Bundesbank Wohnimmobilienpreisindex');
       }
     }
+
+    if (grundflaecheGeschaetzt) {
+      hinweise.push('Grundstücksfläche wurde geschätzt. Bitte exakte Grundstücksfläche für präzisere Bewertung angeben.');
+    }
   } else {
-    // ─── Marktpreis-Indikation: nur ImmoScout-Daten ───
-    if (!marktPreisProQm) return null;
+    // ─── Marktpreis-Indikation / Bundesdurchschnitt-Fallback ───
+    if (marktPreisProQm) {
+      const korrigierterQmPreis = marktPreisProQm * (1 + faktoren.gesamt);
+      realistischerImmobilienwert = Math.round(korrigierterQmPreis * wohnflaeche);
 
-    const korrigierterQmPreis = marktPreisProQm * (1 + faktoren.gesamt);
-    realistischerImmobilienwert = Math.round(korrigierterQmPreis * input.wohnflaeche);
+      if (hasBRW && grundflaeche > 0) {
+        bodenwert = Math.round(brw!.wert * grundflaeche);
+      }
+      gebaeudewert = Math.round(Math.max(0, realistischerImmobilienwert - bodenwert));
 
-    if (hasBRW && grundflaeche > 0) {
-      bodenwert = Math.round(brw!.wert * grundflaeche);
+      datenquellen.push('ImmoScout24 Atlas Marktpreise');
+      if (!hasBRW) {
+        hinweise.push('Kein Bodenrichtwert verfügbar. Bewertung basiert ausschließlich auf ImmoScout Marktdaten.');
+      }
+      if (!input.grundstuecksflaeche) {
+        hinweise.push('Grundstücksfläche fehlt. Aufteilung in Boden-/Gebäudewert nicht möglich.');
+      }
+    } else {
+      // ─── Absoluter Fallback: Bundesdurchschnitt ───
+      const avgQmPreis = istHaus ? NATIONAL_AVG_QM_PREIS.haus : NATIONAL_AVG_QM_PREIS.wohnung;
+      const korrigierterQmPreis = avgQmPreis * (1 + faktoren.gesamt);
+      realistischerImmobilienwert = Math.round(korrigierterQmPreis * wohnflaeche);
+      gebaeudewert = realistischerImmobilienwert; // Ohne BRW → alles als Gebäudewert
+
+      datenquellen.push('Bundesdurchschnitt (Statistisches Bundesamt)');
+      hinweise.push(
+        'Keine lokalen Marktdaten verfügbar. Bewertung basiert auf Bundesdurchschnitt. Abweichungen je nach Lage möglich.',
+      );
     }
-    gebaeudewert = Math.round(Math.max(0, realistischerImmobilienwert - bodenwert));
+  }
 
-    datenquellen.push('ImmoScout24 Atlas Marktpreise');
-    if (!hasBRW) {
-      hinweise.push('Kein Bodenrichtwert verfügbar. Bewertung basiert ausschließlich auf ImmoScout Marktdaten.');
-    }
-    if (!grundflaeche) {
-      hinweise.push('Grundstücksfläche fehlt. Aufteilung in Boden-/Gebäudewert nicht möglich.');
+  // ─── Ertragswertverfahren (Cross-Validation für MFH/ETW) ─────────────────
+  if (mietPreisProQm && mietPreisProQm > 0 && bodenwert > 0 && hasBRW) {
+    const ertragswertResult = calcErtragswert({
+      wohnflaeche,
+      mietpreisProQm: mietPreisProQm,
+      bodenwert,
+      brwProQm: brw!.wert,
+      baujahr: input.baujahr,
+      gebaeudTyp: mapToErtragswertTyp(input.art, input.objektunterart),
+    });
+
+    if (ertragswertResult && ertragswertResult.ertragswert > 0) {
+      ertragswertErgebnis = ertragswertResult.ertragswert;
+      datenquellen.push('Ertragswertverfahren (ImmoWertV §§ 27-34)');
+
+      const abweichung = Math.abs(realistischerImmobilienwert - ertragswertResult.ertragswert)
+        / ertragswertResult.ertragswert;
+
+      if (abweichung > 0.30) {
+        hinweise.push(
+          `Ertragswert (${ertragswertResult.ertragswert.toLocaleString('de-DE')} €) weicht ${Math.round(abweichung * 100)}% vom Sachwert ab. Ertragswert-Details: Rohertrag ${ertragswertResult.jahresrohertrag.toLocaleString('de-DE')} €/J., Liegenschaftszins ${(ertragswertResult.liegenschaftszins * 100).toFixed(1)}%.`,
+        );
+      } else {
+        hinweise.push(
+          `Ertragswert bestätigt Bewertung: ${ertragswertResult.ertragswert.toLocaleString('de-DE')} € (Abweichung ${Math.round(abweichung * 100)}%, LiZi ${(ertragswertResult.liegenschaftszins * 100).toFixed(1)}%, V=${ertragswertResult.vervielfaeltiger}).`,
+        );
+      }
     }
   }
 
   // m²-Preis
-  const realistischerQmPreis = Math.round(realistischerImmobilienwert / input.wohnflaeche);
+  const realistischerQmPreis = Math.round(realistischerImmobilienwert / wohnflaeche);
 
   // Konfidenz + Spanne
-  const { konfidenz, spread } = determineConfidenceAndSpread(brw, bewertungsmethode);
+  // Geschätzte Inputs → immer "gering" mit breiter Spanne
+  let konfidenz: 'hoch' | 'mittel' | 'gering';
+  let spread: number;
+
+  if (wohnflaecheGeschaetzt || (!marktPreisProQm && !hasBRW)) {
+    konfidenz = 'gering';
+    spread = 0.25;
+  } else if (grundflaecheGeschaetzt) {
+    konfidenz = 'gering';
+    spread = 0.20;
+  } else {
+    const cs = determineConfidenceAndSpread(brw, bewertungsmethode, ertragswertErgebnis != null);
+    konfidenz = cs.konfidenz;
+    spread = cs.spread;
+  }
 
   const qmPreisSpanne = {
     min: Math.round(realistischerQmPreis * (1 - spread)),
@@ -397,7 +584,7 @@ export function buildBewertung(
 
   // Cross-Validation
   if (marktPreisProQm && hasBRW) {
-    const pureMarktWert = marktPreisProQm * input.wohnflaeche;
+    const pureMarktWert = marktPreisProQm * wohnflaeche;
     const deviation = Math.abs(realistischerImmobilienwert - pureMarktWert) / pureMarktWert;
     if (deviation > 0.25) {
       hinweise.push(
@@ -407,8 +594,8 @@ export function buildBewertung(
   }
 
   // IRW Cross-Validation (nur NRW)
-  if (irw && input.wohnflaeche > 0) {
-    const irwGesamt = irw.irw * input.wohnflaeche;
+  if (irw && wohnflaeche > 0) {
+    const irwGesamt = irw.irw * wohnflaeche;
     const abweichung = Math.abs(realistischerImmobilienwert - irwGesamt) / irwGesamt;
     datenquellen.push('BORIS-NRW Immobilienrichtwerte');
     if (abweichung > 0.25) {
@@ -433,7 +620,7 @@ export function buildBewertung(
     hinweise.push(
       `Marktpreise basieren auf Stadtteil-Daten für ${marktdaten.stadtteil} (ImmoScout24 Atlas).`,
     );
-  } else {
+  } else if (marktdaten) {
     hinweise.push(
       'Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas). Lage-spezifische Abweichungen möglich.',
     );
@@ -446,6 +633,7 @@ export function buildBewertung(
     immobilienwert_spanne: immobilienwertSpanne,
     bodenwert,
     gebaeudewert,
+    ertragswert: ertragswertErgebnis,
     bewertungsmethode,
     konfidenz,
     faktoren,
