@@ -14,11 +14,13 @@ import { SchleswigHolsteinAdapter } from './adapters/schleswig-holstein.js';
 import { BremenAdapter } from './adapters/bremen.js';
 import { BayernAdapter } from './adapters/bayern.js';
 import { SaarlandAdapter } from './adapters/saarland.js';
+import { ImmoScoutAdapter } from './adapters/immoscout.js';
+import { ChainedAdapter } from './adapters/chained.js';
 import { FallbackAdapter } from './adapters/fallback.js';
 
 /**
  * Adapter-Registry: Bundesland → Adapter-Instanz.
- * 16/16 Bundesländer abgedeckt – 15 automatisch, 1 Fallback.
+ * 16/16 Bundesländer abgedeckt – alle automatisch (inkl. ImmoScout-Schätzung für BY/BW).
  */
 const adapterRegistry: Record<string, BodenrichtwertAdapter> = {
   // Tier 1: WFS-Adapter (freie Daten, hohe Qualität)
@@ -41,13 +43,13 @@ const adapterRegistry: Record<string, BodenrichtwertAdapter> = {
   'Bremen': new BremenAdapter(),
 
   // Tier 2b: WMS-Adapter (GetFeatureInfo, eingeschränktere Lizenzen)
-  // Bayern: VBORIS-WMS funktioniert technisch, aber die meisten BRW-Werte
-  // sind gebührenpflichtig. Gibt null zurück wenn paywalled.
-  'Bayern': new BayernAdapter(),
   'Saarland': new SaarlandAdapter(),
 
-  // Tier 3: Fallback (kein landesweiter Endpunkt verfügbar)
-  'Baden-Württemberg': new FallbackAdapter('Baden-Württemberg'),
+  // Tier 2c: Chained — VBORIS (offiziell, meist paywall) → ImmoScout (Schätzung)
+  'Bayern': new ChainedAdapter(new BayernAdapter(), new ImmoScoutAdapter('Bayern')),
+
+  // Tier 2d: ImmoScout-Schätzung (kein offizieller Endpunkt in BW)
+  'Baden-Württemberg': new ImmoScoutAdapter('Baden-Württemberg'),
 };
 
 /**
