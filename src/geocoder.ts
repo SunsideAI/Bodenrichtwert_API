@@ -4,6 +4,7 @@ export interface GeoResult {
   lat: number;
   lon: number;
   state: string;
+  city: string;           // Stadt/Gemeinde (z.B. "München", "Stuttgart")
   displayName: string;
 }
 
@@ -50,10 +51,19 @@ export async function geocode(
           || plzToState(plz)
           || 'Unbekannt';
 
+        // Stadt: city > town > municipality > county
+        const city = result.address?.city
+          || result.address?.town
+          || result.address?.municipality
+          || result.address?.county
+          || ort
+          || '';
+
         return {
           lat,
           lon,
           state: normalizeStateName(state),
+          city,
           displayName: result.display_name || query,
         };
       }
