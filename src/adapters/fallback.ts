@@ -17,6 +17,12 @@ const FALLBACK_CONFIGS: Record<string, FallbackConfig> = {
     reason: 'Baden-Württemberg hat keinen landesweiten WMS/WFS-Endpunkt. Einzelne Kommunen (Stuttgart, Heidelberg etc.) haben eigene WMS-Dienste, aber keine einheitliche Abdeckung.',
     borisUrl: 'https://www.gutachterausschuesse-bw.de/borisbw/',
   },
+  'Bayern': {
+    state: 'Bayern',
+    stateCode: 'BY',
+    reason: 'Die meisten Gutachterausschüsse in Bayern geben BRW-Werte nur gegen Gebühr heraus. Der VBORIS-WMS-Dienst (geoportal.bayern.de) funktioniert technisch, aber die Wertabfrage ist kostenpflichtig. Nur wenige Stellen sind öffentlich.',
+    borisUrl: 'https://geoportal.bayern.de/bodenrichtwerte/',
+  },
 };
 
 /**

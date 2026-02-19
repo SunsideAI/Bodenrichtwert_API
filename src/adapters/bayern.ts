@@ -14,8 +14,11 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  * GetFeatureInfo-Formate: text/plain, text/html, application/vnd.ogc.gml
  * WMS-Version: 1.1.1
  *
- * HINWEIS: Manche Gutachterausschüsse zeigen den BRW-Wert frei,
- * andere geben "Information gebührenpflichtig" zurück (z.B. München).
+ * HINWEIS: Die meisten Gutachterausschüsse in Bayern geben
+ * "Information gebührenpflichtig" für den BRW-Wert zurück.
+ * Getestet: München, Augsburg, Nürnberg, Garmisch-Partenkirchen — alle paywalled.
+ * Nur wenige Stellen sind öffentlich zugänglich.
+ * Der Adapter gibt null zurück wenn der Wert gebührenpflichtig ist.
  *
  * Lizenz: © Bayerische Vermessungsverwaltung (www.geodaten.bayern.de)
  */

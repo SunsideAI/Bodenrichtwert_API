@@ -61,7 +61,7 @@ app.post('/api/enrich', async (c) => {
           koordinaten: { lat: geo.lat, lon: geo.lon },
           bundesland: geo.state,
         },
-        bodenrichtwert: { ...cached, confidence: 'high' as const },
+        bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') as string },
         erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
         meta: { cached: true, response_time_ms: elapsed },
       });
@@ -128,7 +128,7 @@ app.post('/api/enrich', async (c) => {
         koordinaten: { lat: geo.lat, lon: geo.lon },
         bundesland: geo.state,
       },
-      bodenrichtwert: { ...brw, confidence: 'high' as const },
+      bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
       meta: { cached: false, response_time_ms: elapsed },
     });

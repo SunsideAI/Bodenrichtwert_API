@@ -22,6 +22,8 @@ import { RheinlandPfalzAdapter } from './src/adapters/rlp.js';
 import { BremenAdapter } from './src/adapters/bremen.js';
 import { BayernAdapter } from './src/adapters/bayern.js';
 import { SaarlandAdapter } from './src/adapters/saarland.js';
+import { ImmoScoutAdapter } from './src/adapters/immoscout.js';
+import { ChainedAdapter } from './src/adapters/chained.js';
 
 // ═══════════════════════════════════════════════
 // Testfälle: Bekannte Adressen mit Koordinaten
@@ -135,7 +137,7 @@ const TEST_CASES = [
   {
     code: 'BY',
     name: 'Bayern',
-    adapter: new BayernAdapter(),
+    adapter: new ChainedAdapter(new BayernAdapter(), new ImmoScoutAdapter('Bayern')),
     lat: 48.1374,
     lon: 11.5755,
     adresse: 'Marienplatz 1, 80331, München',
@@ -147,6 +149,14 @@ const TEST_CASES = [
     lat: 49.2354,
     lon: 6.9969,
     adresse: 'Bahnhofstraße 1, 66111, Saarbrücken',
+  },
+  {
+    code: 'BW',
+    name: 'Baden-Württemberg',
+    adapter: new ImmoScoutAdapter('Baden-Württemberg'),
+    lat: 48.7758,
+    lon: 9.1829,
+    adresse: 'Königstraße 1, 70173, Stuttgart',
   },
 ];
 

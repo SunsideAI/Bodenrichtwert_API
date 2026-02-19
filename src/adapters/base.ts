@@ -1,4 +1,15 @@
 /**
+ * Metadaten für geschätzte (nicht offizielle) BRW-Werte
+ */
+export interface EstimationMeta {
+  methode: string;            // z.B. "ImmoScout Atlas Marktpreise × Faktor"
+  basis_preis: number;        // Ursprünglicher Marktpreis (€/m²)
+  faktor: number;             // Angewandter Umrechnungsfaktor (0.22–0.55)
+  datenstand: string;         // z.B. "2026-Q1"
+  hinweis: string;            // Disclaimer
+}
+
+/**
  * Normalisierte BRW-Daten – einheitliches Format über alle Bundesländer
  */
 export interface NormalizedBRW {
@@ -11,6 +22,7 @@ export interface NormalizedBRW {
   bundesland: string;
   quelle: string;            // z.B. "BORIS-HH"
   lizenz: string;
+  schaetzung?: EstimationMeta; // Nur bei Schätzwerten (z.B. ImmoScout)
 }
 
 /**
