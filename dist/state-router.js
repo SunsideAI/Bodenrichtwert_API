@@ -10,10 +10,15 @@ import { MecklenburgVorpommernAdapter } from './adapters/mecklenburg-vorpommern.
 import { SachsenAdapter } from './adapters/sachsen.js';
 import { SachsenAnhaltAdapter } from './adapters/sachsen-anhalt.js';
 import { SchleswigHolsteinAdapter } from './adapters/schleswig-holstein.js';
+import { BremenAdapter } from './adapters/bremen.js';
+import { BayernAdapter } from './adapters/bayern.js';
+import { SaarlandAdapter } from './adapters/saarland.js';
+import { ImmoScoutAdapter } from './adapters/immoscout.js';
+import { ChainedAdapter } from './adapters/chained.js';
 import { FallbackAdapter } from './adapters/fallback.js';
 /**
  * Adapter-Registry: Bundesland → Adapter-Instanz.
- * 16/16 Bundesländer abgedeckt – 12 automatisch, 4 Fallback.
+ * 16/16 Bundesländer abgedeckt – alle automatisch (inkl. ImmoScout-Schätzung für BY/BW).
  */
 const adapterRegistry = {
     // Tier 1: WFS-Adapter (freie Daten, hohe Qualität)
@@ -30,11 +35,14 @@ const adapterRegistry = {
     'Sachsen': new SachsenAdapter(),
     'Sachsen-Anhalt': new SachsenAnhaltAdapter(),
     'Schleswig-Holstein': new SchleswigHolsteinAdapter(),
-    // Tier 3: Fallback (kein freier Zugang / Lizenzeinschränkungen)
-    'Bayern': new FallbackAdapter('Bayern'),
-    'Baden-Württemberg': new FallbackAdapter('Baden-Württemberg'),
-    'Bremen': new FallbackAdapter('Bremen'),
-    'Saarland': new FallbackAdapter('Saarland'),
+    // Tier 1b: WFS-Adapter (freie Daten, gleiche NI-Infrastruktur)
+    'Bremen': new BremenAdapter(),
+    // Tier 2b: WMS-Adapter (GetFeatureInfo, eingeschränktere Lizenzen)
+    'Saarland': new SaarlandAdapter(),
+    // Tier 2c: Chained — VBORIS (offiziell, meist paywall) → ImmoScout (Schätzung)
+    'Bayern': new ChainedAdapter(new BayernAdapter(), new ImmoScoutAdapter('Bayern')),
+    // Tier 2d: ImmoScout-Schätzung (kein offizieller Endpunkt in BW)
+    'Baden-Württemberg': new ImmoScoutAdapter('Baden-Württemberg'),
 };
 /**
  * Wählt den richtigen Adapter für ein Bundesland.

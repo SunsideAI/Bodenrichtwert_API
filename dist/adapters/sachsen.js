@@ -1,30 +1,44 @@
 /**
  * Sachsen Adapter
  *
- * Nutzt den WMS GetFeatureInfo Endpunkt (kein WFS verfügbar).
- * URL: landesvermessung.sachsen.de mit cfg-Parameter für Jahrgang.
+ * Nutzt den GeoSN HTTP-Proxy WMS mit INFO_FORMAT=text/plain.
+ *
+ * Wichtig: text/xml liefert HTML (nicht XML!) – nur text/plain enthält die Daten.
+ *
+ * Antwortformat (text/plain):
+ *   Layer 'brw_bauland_2024'
+ *   Feature 1250309:
+ *     BODENRICHTWERT_TEXT = '2400'
+ *     STICHTAG_TXT = '01.01.2024'
+ *     NUTZUNG = 'MK'
+ *     ENTWICKLUNGSZUSTAND_K = 'B'
+ *     GA_POST_ADRESSE = 'Burgplatz 1, 04109 Leipzig'
+ *
  * CRS: EPSG:25833 (nativ), BBOX in EPSG:4326 (WMS 1.1.1)
- * Lizenz: Erlaubnis- und gebührenfrei
+ * Lizenz: Erlaubnis- und gebührenfrei (© GeoSN)
  */
 export class SachsenAdapter {
     state = 'Sachsen';
     stateCode = 'SN';
     isFallback = false;
-    wmsUrl = 'https://www.landesvermessung.sachsen.de/fp/http-proxy/svc';
-    // Reduzierte Layer-Kandidaten (häufigste zuerst)
-    layerCandidates = ['brw_zonen', 'Bauland', 'BRW', '0'];
+    proxyUrl = 'https://www.landesvermessung.sachsen.de/fp/http-proxy/svc';
+    // Layer names as discovered via GetCapabilities (cfg=boris_YEAR)
+    // brw_2024 is a shorthand that maps to brw_bauland_2024 on the server
+    // Include both forms since mapping may not always work
+    layers = [
+        'brw_2024', 'brw_bauland_2024',
+        'brw_2023', 'brw_bauland_2023',
+    ];
     async getBodenrichtwert(lat, lon) {
-        // Nur aktuellstes Jahr versuchen, dann ein Fallback-Jahr
-        for (const year of ['2024', '2023']) {
-            for (const layer of this.layerCandidates) {
-                try {
-                    const result = await this.queryWms(lat, lon, year, layer);
-                    if (result)
-                        return result;
-                }
-                catch {
-                    // Nächste Kombination versuchen
-                }
+        for (const layer of this.layers) {
+            const year = layer.match(/\d{4}/)?.[0] || '2024';
+            try {
+                const result = await this.queryWms(lat, lon, year, layer);
+                if (result)
+                    return result;
+            }
+            catch {
+                // Try next layer
             }
         }
         return null;
@@ -45,64 +59,99 @@ export class SachsenAdapter {
             HEIGHT: '101',
             X: '50',
             Y: '50',
-            INFO_FORMAT: 'text/xml',
+            // text/xml returns HTML! Only text/plain contains the actual key=value data.
+            INFO_FORMAT: 'text/plain',
             FEATURE_COUNT: '5',
             STYLES: '',
             FORMAT: 'image/png',
         });
-        const url = `${this.wmsUrl}?${params}`;
+        const url = `${this.proxyUrl}?${params}`;
         const res = await fetch(url, {
             headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-            signal: AbortSignal.timeout(10000),
+            signal: AbortSignal.timeout(15000),
         });
         if (!res.ok)
             return null;
         const text = await res.text();
+        // Empty or error response
         if (text.includes('ServiceException') || text.includes('ExceptionReport'))
             return null;
-        // Leere Antwort oder sehr kurzer Text → kein Treffer
-        if (text.length < 50)
+        if (!text.includes('Feature ') && !text.includes('BODENRICHTWERT'))
             return null;
-        const wert = this.extractValue(text);
-        if (!wert || wert <= 0)
+        const parsed = this.parseTextPlain(text, year);
+        return parsed;
+    }
+    /**
+     * Parses the text/plain GetFeatureInfo response.
+     * Format:
+     *   Layer 'brw_bauland_2024'
+     *   Feature 1234:
+     *     KEY = 'VALUE'
+     *     ...
+     */
+    parseTextPlain(text, fallbackYear) {
+        const get = (key) => {
+            // Match:  KEY = 'VALUE'  or  KEY = VALUE
+            const re = new RegExp(`^\\s*${key}\\s*=\\s*'?([^'\\n]*)'?`, 'im');
+            const m = text.match(re);
+            return m ? m[1].trim() : '';
+        };
+        // Value field
+        const brwRaw = get('BODENRICHTWERT_TEXT') || get('BODENRICHTWERT_LABEL') || get('BRW');
+        if (!brwRaw)
             return null;
+        const wert = parseFloat(brwRaw.replace(',', '.'));
+        if (!wert || wert <= 0 || wert > 500_000 || !isFinite(wert))
+            return null;
+        // Date: '01.01.2024' → '2024-01-01'
+        const stichtagRaw = get('STICHTAG_TXT') || get('STICHTAG');
+        const stichtag = this.convertDate(stichtagRaw) || `${fallbackYear}-01-01`;
+        // Usage
+        const nutzungsart = get('NUTZUNG') || get('NUTZUNG_TEXT') || 'unbekannt';
+        // Development state
+        const entwicklungszustand = get('ENTWICKLUNGSZUSTAND_K') || get('ENTW') || 'B';
+        // Zone/reference number
+        const zone = get('BODENRICHTWERTNUMMER') || get('BRZ_KURZTEXT') || '';
+        // Municipality: extract from postal address "Burgplatz 1, 04109 Leipzig"
+        const gemeinde = this.extractGemeinde(get('GA_POST_ADRESSE'), get('GA_POST_NAME'));
         return {
             wert,
-            stichtag: this.extractField(text, 'stichtag') || this.extractField(text, 'stag') || `${year}-01-01`,
-            nutzungsart: this.extractField(text, 'nutzungsart') || this.extractField(text, 'nuta') || 'unbekannt',
-            entwicklungszustand: this.extractField(text, 'entwicklungszustand') || this.extractField(text, 'entw') || 'B',
-            zone: this.extractField(text, 'zone') || this.extractField(text, 'wnum') || '',
-            gemeinde: this.extractField(text, 'gemeinde') || this.extractField(text, 'gena') || '',
+            stichtag,
+            nutzungsart,
+            entwicklungszustand,
+            zone,
+            gemeinde,
             bundesland: 'Sachsen',
-            quelle: `BORIS-Sachsen (${year})`,
+            quelle: `BORIS-Sachsen (${fallbackYear})`,
             lizenz: '© GeoSN, erlaubnis- und gebührenfrei',
         };
     }
-    extractValue(text) {
-        const patterns = [
-            /<[^>]*:?(?:brw|wert|bodenrichtwert|richtwert|BRW|Wert|Bodenrichtwert)[^>]*>([\d.,]+)<\//i,
-            /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m|€\/m)/i,
-            /(?:brw|wert|bodenrichtwert)[:\s=]*([\d.,]+)/i,
-        ];
-        for (const pattern of patterns) {
-            const match = text.match(pattern);
-            if (match) {
-                let numStr = match[1];
-                // Deutsche Zahlenformat: 1.250,50 → 1250.50
-                if (numStr.includes(',')) {
-                    numStr = numStr.replace(/\./g, '').replace(',', '.');
-                }
-                const val = parseFloat(numStr);
-                if (val > 0 && isFinite(val))
-                    return val;
+    /** Convert German date format '01.01.2024' → '2024-01-01' */
+    convertDate(raw) {
+        const m = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+        if (!m)
+            return null;
+        return `${m[3]}-${m[2]}-${m[1]}`;
+    }
+    /** Extract city name from address string "Burgplatz 1, 04109 Leipzig" → "Leipzig" */
+    extractGemeinde(adresse, gaName) {
+        if (adresse) {
+            // Last comma-separated part, remove postal code prefix
+            const parts = adresse.split(',');
+            if (parts.length > 1) {
+                const stadtPart = parts[parts.length - 1].trim();
+                const city = stadtPart.replace(/^\d{5}\s+/, '').trim();
+                if (city)
+                    return city;
             }
         }
-        return null;
-    }
-    extractField(text, field) {
-        const re = new RegExp(`<[^>]*:?${field}[^>]*>([^<]+)<`, 'i');
-        const match = text.match(re);
-        return match ? match[1].trim() : null;
+        if (gaName) {
+            // "Gutachterausschuss ... in der Stadt Leipzig" → "Leipzig"
+            const m = gaName.match(/(?:in der Stadt|im Landkreis|im Kreis|in der Gemeinde|in)\s+(.+)$/i);
+            if (m)
+                return m[1].trim();
+        }
+        return '';
     }
     async healthCheck() {
         try {
@@ -112,7 +161,7 @@ export class SachsenAdapter {
                 VERSION: '1.1.1',
                 REQUEST: 'GetCapabilities',
             });
-            const res = await fetch(`${this.wmsUrl}?${params}`, {
+            const res = await fetch(`${this.proxyUrl}?${params}`, {
                 signal: AbortSignal.timeout(5000),
             });
             return res.ok;

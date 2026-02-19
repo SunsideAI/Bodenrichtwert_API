@@ -2,6 +2,8 @@ export interface GeoResult {
     lat: number;
     lon: number;
     state: string;
+    city: string;
+    district: string;
     displayName: string;
 }
 /**

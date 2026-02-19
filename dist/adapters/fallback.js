@@ -1,27 +1,15 @@
 const FALLBACK_CONFIGS = {
-    'Bayern': {
-        state: 'Bayern',
-        stateCode: 'BY',
-        reason: 'Bayern stellt keine freien WFS-Daten bereit (kostenpflichtig nach BayKostG). Bitte BORIS-Bayern für manuelle Abfrage nutzen.',
-        borisUrl: 'https://www.boris-bayern.de',
-    },
     'Baden-Württemberg': {
         state: 'Baden-Württemberg',
         stateCode: 'BW',
-        reason: 'Baden-Württemberg erlaubt seit 2024 freie Ansicht, schließt aber kommerzielle Nutzung explizit aus.',
-        borisUrl: 'https://www.boris-bw.de',
+        reason: 'Baden-Württemberg hat keinen landesweiten WMS/WFS-Endpunkt. Einzelne Kommunen (Stuttgart, Heidelberg etc.) haben eigene WMS-Dienste, aber keine einheitliche Abdeckung.',
+        borisUrl: 'https://www.gutachterausschuesse-bw.de/borisbw/',
     },
-    'Bremen': {
-        state: 'Bremen',
-        stateCode: 'HB',
-        reason: 'Bremen bietet derzeit keinen freien WFS-Zugang.',
-        borisUrl: 'https://www.gutachterausschuss.bremen.de',
-    },
-    'Saarland': {
-        state: 'Saarland',
-        stateCode: 'SL',
-        reason: 'Saarland erlaubt nur Ansicht im Geoportal, Einbindung in andere Anwendungen ist nicht gestattet.',
-        borisUrl: 'https://geoportal.saarland.de/article/Bodenrichtwerte/',
+    'Bayern': {
+        state: 'Bayern',
+        stateCode: 'BY',
+        reason: 'Die meisten Gutachterausschüsse in Bayern geben BRW-Werte nur gegen Gebühr heraus. Der VBORIS-WMS-Dienst (geoportal.bayern.de) funktioniert technisch, aber die Wertabfrage ist kostenpflichtig. Nur wenige Stellen sind öffentlich.',
+        borisUrl: 'https://geoportal.bayern.de/bodenrichtwerte/',
     },
 };
 /**

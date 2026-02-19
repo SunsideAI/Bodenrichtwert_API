@@ -31,10 +31,24 @@ export async function geocode(strasse, plz, ort) {
                 const state = result.address?.state
                     || plzToState(plz)
                     || 'Unbekannt';
+                // Stadt: city > town > municipality > county
+                const city = result.address?.city
+                    || result.address?.town
+                    || result.address?.municipality
+                    || result.address?.county
+                    || ort
+                    || '';
+                // Stadtteil: suburb > city_district > quarter
+                const district = result.address?.suburb
+                    || result.address?.city_district
+                    || result.address?.quarter
+                    || '';
                 return {
                     lat,
                     lon,
                     state: normalizeStateName(state),
+                    city,
+                    district,
                     displayName: result.display_name || query,
                 };
             }

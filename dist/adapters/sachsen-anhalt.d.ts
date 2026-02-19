@@ -12,6 +12,7 @@ export declare class SachsenAnhaltAdapter implements BodenrichtwertAdapter {
     stateCode: string;
     isFallback: boolean;
     private baseUrl;
+    private readonly MAX_BRW;
     private layerCandidates;
     getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null>;
     private queryWms;

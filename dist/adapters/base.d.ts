@@ -1,4 +1,14 @@
 /**
+ * Metadaten für geschätzte (nicht offizielle) BRW-Werte
+ */
+export interface EstimationMeta {
+    methode: string;
+    basis_preis: number;
+    faktor: number;
+    datenstand: string;
+    hinweis: string;
+}
+/**
  * Normalisierte BRW-Daten – einheitliches Format über alle Bundesländer
  */
 export interface NormalizedBRW {
@@ -11,6 +21,7 @@ export interface NormalizedBRW {
     bundesland: string;
     quelle: string;
     lizenz: string;
+    schaetzung?: EstimationMeta;
 }
 /**
  * Interface das jeder Bundesland-Adapter implementieren muss

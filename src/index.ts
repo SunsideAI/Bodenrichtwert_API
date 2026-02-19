@@ -16,6 +16,8 @@ import { fetchPreisindex } from './utils/bundesbank.js';
 import type { PreisindexEntry } from './utils/bundesbank.js';
 import { fetchImmobilienrichtwert } from './utils/nrw-irw.js';
 import type { NRWImmobilienrichtwert } from './utils/nrw-irw.js';
+import { fetchBaupreisindex } from './utils/destatis.js';
+import type { BaupreisindexResult } from './utils/destatis.js';
 
 const app = new Hono();
 
@@ -134,6 +136,28 @@ async function getPreisindex(): Promise<PreisindexEntry[] | null> {
   return _preisindexCache?.data ?? null;
 }
 
+// ─── Destatis Baupreisindex (gecacht) ────────────────────────────────────────
+
+let _baupreisindexCache: { data: BaupreisindexResult; fetchedAt: number } | null = null;
+const BAUPREISINDEX_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 Tage (quartalsweise aktualisiert)
+
+async function getBaupreisindex(): Promise<BaupreisindexResult | null> {
+  if (_baupreisindexCache && Date.now() - _baupreisindexCache.fetchedAt < BAUPREISINDEX_TTL_MS) {
+    return _baupreisindexCache.data;
+  }
+
+  try {
+    const data = await fetchBaupreisindex();
+    _baupreisindexCache = { data, fetchedAt: Date.now() };
+    console.log(`Destatis Baupreisindex: ${data.stand}, Faktor ${data.faktor} (${data.quelle})`);
+    return data;
+  } catch (err) {
+    console.warn('Destatis Baupreisindex Fehler:', err);
+  }
+
+  return _baupreisindexCache?.data ?? null;
+}
+
 /**
  * Konvertiert ImmoScoutPrices in das kompakte API-Response-Format.
  */
@@ -189,7 +213,8 @@ function buildBewertungFromContext(
   marktdaten: ImmoScoutPrices | null,
   preisindex?: PreisindexEntry[] | null,
   irw?: NRWImmobilienrichtwert | null,
-): Bewertung | null {
+  baupreisindex?: BaupreisindexResult | null,
+): Bewertung {
   return buildBewertung(
     {
       art: body.art || null,
@@ -205,6 +230,7 @@ function buildBewertungFromContext(
     marktdaten,
     preisindex,
     irw,
+    baupreisindex,
   );
 }
 
@@ -237,7 +263,7 @@ app.post('/api/enrich', async (c) => {
       }, 400);
     }
 
-    // 2. ImmoScout-Marktdaten + Bundesbank-Preisindex + NRW-IRW parallel starten (blockiert nie)
+    // 2. Alle externen Datenquellen parallel starten (blockiert nie)
     const marktdatenPromise = fetchMarktdaten(geo.state, geo.city)
       .then((cityPrices) => fetchDistrictMarktdaten(geo.state, geo.city, geo.district, cityPrices))
       .catch((err) => {
@@ -245,6 +271,7 @@ app.post('/api/enrich', async (c) => {
         return null;
       });
     const preisindexPromise = getPreisindex().catch(() => null);
+    const baupreisindexPromise = getBaupreisindex().catch(() => null);
 
     // NRW-IRW nur für Nordrhein-Westfalen abrufen (Teilmarkt aus art ableiten)
     const irwPromise: Promise<NRWImmobilienrichtwert | null> =
@@ -263,7 +290,9 @@ app.post('/api/enrich', async (c) => {
     const cached = cache.get(cacheKey);
 
     if (cached) {
-      const [marktdaten, preisindex, irw] = await Promise.all([marktdatenPromise, preisindexPromise, irwPromise]);
+      const [marktdaten, preisindex, irw, bpi] = await Promise.all([
+        marktdatenPromise, preisindexPromise, irwPromise, baupreisindexPromise,
+      ]);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'success',
@@ -275,7 +304,7 @@ app.post('/api/enrich', async (c) => {
         bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') as string },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw),
+        bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi),
         meta: { cached: true, response_time_ms: elapsed },
       });
     }
@@ -284,7 +313,9 @@ app.post('/api/enrich', async (c) => {
     const adapter = routeToAdapter(geo.state);
 
     if (adapter.isFallback) {
-      const [marktdaten, preisindex, irw] = await Promise.all([marktdatenPromise, preisindexPromise, irwPromise]);
+      const [marktdaten, preisindex, irw, bpi] = await Promise.all([
+        marktdatenPromise, preisindexPromise, irwPromise, baupreisindexPromise,
+      ]);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'manual_required',
@@ -303,17 +334,18 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw),
+        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
 
-    // 5. BRW + Marktdaten + Preisindex + IRW parallel abfragen
-    const [brw, marktdaten, preisindex, irw] = await Promise.all([
+    // 5. BRW + alle Datenquellen parallel abfragen
+    const [brw, marktdaten, preisindex, irw, bpi] = await Promise.all([
       adapter.getBodenrichtwert(geo.lat, geo.lon),
       marktdatenPromise,
       preisindexPromise,
       irwPromise,
+      baupreisindexPromise,
     ]);
     const elapsed = Date.now() - start;
 
@@ -333,7 +365,7 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw),
+        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -354,7 +386,7 @@ app.post('/api/enrich', async (c) => {
       bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
       marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
-      bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw),
+      bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi),
       meta: { cached: false, response_time_ms: elapsed },
     });
 
@@ -439,7 +471,7 @@ app.get('/api/optionen', (c) => {
 app.get('/', (c) => {
   return c.json({
     name: 'BRW Enrichment API',
-    version: '1.1.0',
+    version: '2.0.0',
     endpoints: {
       enrich:   'POST /api/enrich',
       optionen: 'GET /api/optionen',

@@ -12,5 +12,6 @@ export declare class BrandenburgAdapter implements BodenrichtwertAdapter {
     isFallback: boolean;
     private baseUrl;
     getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null>;
+    private extractGemeinde;
     healthCheck(): Promise<boolean>;
 }
