@@ -23,10 +23,14 @@ function calcBaujahrFaktor(baujahr) {
     if (baujahr >= 2020)
         return 0; // Neubau-Faktor übernimmt den Zeitwertbonus
     if (baujahr < 1950)
-        return -0.10;
+        return -0.20;
+    if (baujahr <= 1969)
+        return -0.15;
     if (baujahr <= 1979)
+        return -0.12;
+    if (baujahr <= 1994)
         return -0.08;
-    if (baujahr <= 1999)
+    if (baujahr <= 2004)
         return -0.04;
     if (baujahr <= 2010)
         return 0;
@@ -44,10 +48,10 @@ function calcModernisierungFaktor(modernisierung, baujahr) {
         if (score >= 4)
             return 0;
         if (score >= 3)
-            return alter < 1970 ? -0.06 : alter < 1990 ? -0.04 : -0.02;
+            return alter < 1970 ? -0.06 : alter < 1990 ? -0.04 : -0.04;
         if (score >= 2)
-            return alter < 1970 ? -0.10 : alter < 1990 ? -0.08 : -0.05;
-        return alter < 1970 ? -0.18 : alter < 1990 ? -0.12 : -0.02;
+            return alter < 1970 ? -0.10 : alter < 1990 ? -0.08 : -0.07;
+        return alter < 1970 ? -0.18 : alter < 1990 ? -0.12 : -0.06;
     }
     const m = modernisierung.toLowerCase();
     if (m.includes('kernsanierung') || m.includes('neuwertig'))
@@ -60,21 +64,21 @@ function calcModernisierungFaktor(modernisierung, baujahr) {
             return -0.06;
         if (baujahr && baujahr < 1990)
             return -0.04;
-        return -0.02;
+        return -0.04;
     }
     if (m.includes('nur einzelne') || m.includes('einzelne maßnahmen') || m.includes('einzelne')) {
         if (baujahr && baujahr < 1970)
             return -0.10;
         if (baujahr && baujahr < 1990)
             return -0.08;
-        return -0.05;
+        return -0.07;
     }
     if (m.includes('keine') || m.includes('unsaniert') || m.includes('unrenoviert')) {
         if (baujahr && baujahr < 1970)
             return -0.18;
         if (baujahr && baujahr < 1990)
             return -0.12;
-        return -0.02;
+        return -0.06;
     }
     return 0;
 }
@@ -249,6 +253,41 @@ function selectMarktpreis(marktdaten, istHaus) {
     }
     return marktdaten.wohnung_kauf_preis ?? marktdaten.haus_kauf_preis;
 }
+function selectMarktpreisMin(marktdaten, istHaus) {
+    if (!marktdaten)
+        return null;
+    if (istHaus) {
+        return marktdaten.haus_kauf_min ?? marktdaten.wohnung_kauf_min;
+    }
+    return marktdaten.wohnung_kauf_min ?? marktdaten.haus_kauf_min;
+}
+function selectMarktpreisMax(marktdaten, istHaus) {
+    if (!marktdaten)
+        return null;
+    if (istHaus) {
+        return marktdaten.haus_kauf_max ?? marktdaten.wohnung_kauf_max;
+    }
+    return marktdaten.wohnung_kauf_max ?? marktdaten.haus_kauf_max;
+}
+/**
+ * Berechnet den faktor-adjustierten €/m²-Preis mittels Min/Max-Interpolation.
+ * Statt `median * (1 + faktoren)` wird die Position im [min, max]-Bereich
+ * anhand der Faktorsumme bestimmt (ImmoWertV § 15 Vergleichswertverfahren).
+ *
+ * SCALE = 0.15: Bei Faktorsumme ±0.15 → voll bei min/max.
+ */
+function calcAdjustedQmPreis(median, min, max, faktorenGesamt) {
+    const SCALE = 0.15;
+    if (min != null && max != null && min < median && max > median) {
+        const t = Math.max(-1, Math.min(1, faktorenGesamt / SCALE));
+        if (t < 0) {
+            return median - Math.abs(t) * (median - min);
+        }
+        return median + t * (max - median);
+    }
+    // Fallback: kein min/max (z.B. Atlas-Daten) → klassische Prozent-Methode
+    return median * (1 + faktorenGesamt);
+}
 function selectMietpreis(marktdaten, istHaus) {
     if (!marktdaten)
         return null;
@@ -335,6 +374,8 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
         uo.includes('loft');
     const istHaus = !istWohnung;
     const marktPreisProQm = selectMarktpreis(marktdaten, istHaus);
+    const marktPreisMin = selectMarktpreisMin(marktdaten, istHaus);
+    const marktPreisMax = selectMarktpreisMax(marktdaten, istHaus);
     const mietPreisProQm = selectMietpreis(marktdaten, istHaus);
     // ─── Grundfläche: verwende Original oder schätze (NUR für Häuser) ───────────
     let grundflaeche = input.grundstuecksflaeche || 0;
@@ -399,9 +440,11 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
     }
     if (bewertungsmethode === 'vergleichswert') {
         // ─── Vergleichswertverfahren (ImmoWertV § 15): primäre Methode für ETW/Wohnungen ───
-        // Marktwert = Wohnfläche × regionaler Vergleichspreis × Korrekturfaktoren
+        // Marktwert = Wohnfläche × faktor-adjustierter Vergleichspreis
+        // Min/Max-Interpolation: Faktoren positionieren innerhalb der realen Marktspanne
         // Bodenwertanteil ist im Vergleichswert enthalten (kein separater Abzug)
-        const vergleichswert = Math.round(marktPreisProQm * wohnflaeche * (1 + faktoren.gesamt));
+        const adjustedQmPreis = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt);
+        const vergleichswert = Math.round(adjustedQmPreis * wohnflaeche);
         // Ertragswert für Wohnungen (Gewichtung 80/20 wenn Mietdaten verfügbar)
         if (mietPreisProQm && mietPreisProQm > 0) {
             // Für Ertragswert: bodenwert-Proxy aus BRW; wenn kein BRW → 25% des Vergleichswerts (typisch ETW)
@@ -448,7 +491,8 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
         const brwKorrigiert = brw.wert * (1 + faktoren.stichtag_korrektur);
         bodenwert = Math.round(brwKorrigiert * grundflaeche);
         if (marktPreisProQm) {
-            const marktGesamt = marktPreisProQm * wohnflaeche * (1 + faktoren.gesamt);
+            const adjustedQmPreisSachwert = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt);
+            const marktGesamt = adjustedQmPreisSachwert * wohnflaeche;
             gebaeudewert = Math.round(Math.max(0, marktGesamt - bodenwert));
             if (marktGesamt - bodenwert < 0) {
                 hinweise.push('Bodenwert übersteigt Marktindikation. Grundstücksanteil dominiert den Gesamtwert.');
@@ -512,7 +556,7 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
     else {
         // ─── Marktpreis-Indikation / Bundesdurchschnitt-Fallback ───
         if (marktPreisProQm) {
-            const korrigierterQmPreis = marktPreisProQm * (1 + faktoren.gesamt);
+            const korrigierterQmPreis = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt);
             realistischerImmobilienwert = Math.round(korrigierterQmPreis * wohnflaeche);
             if (hasBRW && grundflaeche > 0) {
                 bodenwert = Math.round(brw.wert * grundflaeche);
