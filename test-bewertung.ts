@@ -268,6 +268,39 @@ function runUnitTests() {
     console.log('');
   }
 
+  // 14. parseNum-Simulation: Deutsches Zahlenformat (Komma als Dezimal)
+  {
+    console.log('Test 14: Deutsches Zahlenformat — "138,68" als Wohnfläche');
+    // Simuliert parseNum("138,68") → 138.68
+    const parsed = parseFloat('138,68'.replace(/\./g, '').replace(',', '.'));
+    const result = buildBewertung(
+      mockInput({ wohnflaeche: parsed, grundstuecksflaeche: null }),
+      mockBRW(),
+      mockMarktdaten(),
+    );
+    assert(result !== null, 'Result ist nicht null');
+    assert(!isNaN(result!.realistischer_immobilienwert), 'Immobilienwert ist keine NaN');
+    assert(result!.realistischer_immobilienwert > 0, `Immobilienwert > 0 (${result!.realistischer_immobilienwert})`);
+    assert(result!.realistischer_qm_preis > 0, `QM-Preis > 0 (${result!.realistischer_qm_preis})`);
+    console.log(`    → Wohnfläche: ${parsed}m², Wert: ${result!.realistischer_immobilienwert}€, QM: ${result!.realistischer_qm_preis}€/m²\n`);
+  }
+
+  // 15. parseNum-Simulation: Tausenderpunkt "1.200,50"
+  {
+    console.log('Test 15: Tausenderpunkt — "1.200,50" als Grundstücksfläche');
+    const parsed = parseFloat('1.200,50'.replace(/\./g, '').replace(',', '.'));
+    assertApprox(parsed, 1200.50, 0.01, 'Parsing "1.200,50" = 1200.50');
+    const result = buildBewertung(
+      mockInput({ grundstuecksflaeche: parsed }),
+      mockBRW(),
+      mockMarktdaten(),
+    );
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.bewertungsmethode === 'sachwert-lite', 'Methode = sachwert-lite');
+    assert(result!.bodenwert > 0, `Bodenwert > 0 (${result!.bodenwert})`);
+    console.log(`    → Grundstück: ${parsed}m², Bodenwert: ${result!.bodenwert}€\n`);
+  }
+
   // Zusammenfassung
   console.log('═══════════════════════════════════════════════');
   console.log(`  Ergebnis: ${passed} bestanden, ${failed} fehlgeschlagen`);

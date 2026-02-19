@@ -84,6 +84,19 @@ function formatMarktdaten(prices: ImmoScoutPrices) {
 // Bewertung aus Request-Kontext erstellen
 // ==========================================
 
+/**
+ * Parst einen Zahlenwert aus beliebigem Input (Zahl, deutscher String, etc.)
+ * "138,68" → 138.68 | "1.200,50" → 1200.50 | 42 → 42 | null → null
+ */
+function parseNum(val: any): number | null {
+  if (typeof val === 'number') return isNaN(val) ? null : val;
+  if (typeof val !== 'string' || val.trim() === '') return null;
+  // Deutsches Format: "1.200,50" → "1200.50"
+  const cleaned = val.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? null : n;
+}
+
 function buildBewertungFromContext(
   body: Record<string, any>,
   brw: NormalizedBRW | null,
@@ -92,9 +105,9 @@ function buildBewertungFromContext(
   return buildBewertung(
     {
       art: body.art || null,
-      grundstuecksflaeche: body.grundstuecksflaeche || null,
-      wohnflaeche: body.wohnflaeche || null,
-      baujahr: body.baujahr || null,
+      grundstuecksflaeche: parseNum(body.grundstuecksflaeche),
+      wohnflaeche: parseNum(body.wohnflaeche),
+      baujahr: parseNum(body.baujahr),
       objektunterart: body.objektunterart || null,
       modernisierung: body.modernisierung || null,
       energie: body.energie || null,
