@@ -9,7 +9,7 @@ import { cache, immoCache } from './cache.js';
 import { buildEnrichment } from './enrichment.js';
 import { buildBewertung } from './bewertung.js';
 import type { Bewertung } from './bewertung.js';
-import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, slugify } from './utils/immoscout-scraper.js';
+import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify } from './utils/immoscout-scraper.js';
 import type { ImmoScoutPrices } from './utils/immoscout-scraper.js';
 import type { NormalizedBRW } from './adapters/base.js';
 import { fetchPreisindex } from './utils/bundesbank.js';
@@ -45,7 +45,7 @@ function extractKreisname(county: string): string {
 
 /**
  * Holt ImmoScout-Marktdaten für eine Stadt (mit Cache).
- * Fallback-Kette: Stadt-Atlas → Landkreis-Atlas → null
+ * Fallback-Kette: Stadt-Atlas → Landkreis-Atlas → IS24-Suche → null
  * Gibt null zurück bei Fehlern – blockiert nie die Haupt-Response.
  */
 async function fetchMarktdaten(
@@ -94,6 +94,27 @@ async function fetchMarktdaten(
         return kreisPrices;
       }
     }
+  }
+
+  // 4. IS24-Suche als letzter Fallback (individuelle Listings parsen)
+  try {
+    const searchKreisSlug = county ? buildSearchKreisSlug(county) : undefined;
+    const searchCacheKey = `${bundeslandSlug}:suche:${stadtSlug}`;
+
+    const searchCache = immoCache.get(searchCacheKey);
+    if (searchCache) {
+      console.log(`ImmoScout-Cache hit (Suche): ${searchCacheKey}`);
+      return searchCache;
+    }
+
+    console.log(`ImmoScout: Atlas leer für ${city}, versuche IS24-Suche...`);
+    const searchPrices = await scrapeImmoScoutSearch(bundeslandSlug, searchKreisSlug, stadtSlug, city);
+    if (searchPrices) {
+      immoCache.set(searchCacheKey, searchPrices);
+      return searchPrices;
+    }
+  } catch (err) {
+    console.warn(`ImmoScout Suche Fehler für ${city}:`, err);
   }
 
   return null;
@@ -205,7 +226,10 @@ function formatMarktdaten(prices: ImmoScoutPrices) {
     stadt: prices.stadt,
     stadtteil: prices.stadtteil || undefined,
     datenstand: `${prices.jahr}-Q${prices.quartal}`,
-    quelle: 'ImmoScout24 Atlas',
+    quelle: (prices.haus_miete_preis == null && prices.wohnung_miete_preis == null
+      && (prices.haus_kauf_preis != null || prices.wohnung_kauf_preis != null))
+      ? 'ImmoScout24 Suche (Listing-Auswertung)'
+      : 'ImmoScout24 Atlas',
   };
 }
 
