@@ -381,43 +381,78 @@ async function mobileSearch(geocode: string, realestatetype: string): Promise<Se
       console.log(`ImmoScout Mobile: Response preview: ${preview}`);
     }
 
-    // Response: items[] filtern nach type === 'EXPOSE_RESULT'
-    const items: any[] = data?.items || data?.resultlistEntries?.[0]?.resultlistEntry || data?.searchResponseModel?.resultlistEntries?.[0]?.resultlistEntry || [];
+    // Mobile API Response: { resultListItems: [{ type, item: {...} }] }
+    const resultListItems: any[] = data?.resultListItems
+      || data?.items
+      || data?.resultlistEntries?.[0]?.resultlistEntry
+      || [];
 
-    for (const item of items) {
-      // fredy-Format: item.type === 'EXPOSE_RESULT' → item.expose.item
-      const expose = item?.type === 'EXPOSE_RESULT'
-        ? item?.expose?.item
-        : item;
+    // Debug: Erstes Item komplett loggen um Struktur zu verstehen
+    if (resultListItems.length > 0) {
+      const firstItem = resultListItems[0];
+      const innerItem = firstItem?.item || firstItem?.expose?.item || firstItem;
+      const innerKeys = Object.keys(innerItem || {});
+      console.log(`ImmoScout Mobile: First item type=${firstItem?.type}, inner keys: [${innerKeys.join(', ')}]`);
+      // Komplettes erstes Item (ohne Bilder) loggen
+      const stripped = { ...innerItem };
+      delete stripped.pictures;
+      delete stripped.titlePicture;
+      console.log(`ImmoScout Mobile: First item data: ${JSON.stringify(stripped).substring(0, 800)}`);
+    }
 
+    for (const entry of resultListItems) {
+      if (entry?.type && entry.type !== 'EXPOSE_RESULT') continue;
+
+      // Mobile API: entry.item enthält die Expose-Daten
+      const expose = entry?.item || entry?.expose?.item || entry;
       if (!expose) continue;
 
       let price = 0;
       let area = 0;
 
-      // Attributes-Array durchsuchen (Mobile-API-Format)
+      // 1. Attributes-Array durchsuchen (sections > attributes)
       const attrSections: any[] = expose?.attributes || expose?.sections || [];
       for (const section of attrSections) {
         const attrs: any[] = section?.attributes || (Array.isArray(section) ? section : [section]);
         for (const attr of attrs) {
-          const label = String(attr?.label || '').toLowerCase();
+          const label = String(attr?.label || attr?.title || '').toLowerCase();
           const text = String(attr?.text || attr?.value || '');
 
-          if (label.includes('kaufpreis') || label.includes('preis')) {
-            price = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
+          if (!price && (label.includes('kaufpreis') || label.includes('preis'))) {
+            const parsed = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
+            if (parsed > 0) price = parsed;
           }
-          if (label.includes('wohnfläche') || label.includes('fläche ca')) {
-            area = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
+          if (!area && (label.includes('wohnfläche') || label.includes('fläche'))) {
+            const parsed = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
+            if (parsed > 0) area = parsed;
           }
         }
       }
 
-      // Alternativ: direkte Felder (Mutzel_Scraper-Format)
-      if (!price && expose?.price) {
-        price = typeof expose.price === 'number' ? expose.price : parseFloat(String(expose.price).replace(/[^\d,]/g, '').replace(',', '.'));
+      // 2. Direkte Felder am Expose-Objekt
+      if (!price) {
+        const p = expose?.price ?? expose?.buyingPrice ?? expose?.purchasePrice;
+        if (p) price = typeof p === 'number' ? p : parseFloat(String(p).replace(/[^\d,]/g, '').replace(',', '.'));
       }
-      if (!area && expose?.livingSpace) {
-        area = typeof expose.livingSpace === 'number' ? expose.livingSpace : parseFloat(String(expose.livingSpace).replace(/[^\d,]/g, '').replace(',', '.'));
+      if (!area) {
+        const a = expose?.livingSpace ?? expose?.livingArea ?? expose?.area;
+        if (a) area = typeof a === 'number' ? a : parseFloat(String(a).replace(/[^\d,]/g, '').replace(',', '.'));
+      }
+
+      // 3. keyValues / features Array (manche API-Versionen)
+      if ((!price || !area) && expose?.keyValues) {
+        for (const kv of Array.isArray(expose.keyValues) ? expose.keyValues : []) {
+          const key = String(kv?.key || kv?.label || '').toLowerCase();
+          const val = kv?.value ?? kv?.text ?? '';
+          if (!price && (key.includes('preis') || key.includes('price'))) {
+            const parsed = parseFloat(String(val).replace(/[^\d,]/g, '').replace(',', '.'));
+            if (parsed > 0) price = parsed;
+          }
+          if (!area && (key.includes('fläche') || key.includes('area') || key.includes('space'))) {
+            const parsed = parseFloat(String(val).replace(/[^\d,]/g, '').replace(',', '.'));
+            if (parsed > 0) area = parsed;
+          }
+        }
       }
 
       if (price > 10000 && area > 10) {
