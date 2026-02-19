@@ -55,6 +55,7 @@ export interface Bewertung {
 
 function calcBaujahrFaktor(baujahr: number | null): number {
   if (baujahr == null) return 0;
+  if (baujahr >= 2020) return 0; // Neubau-Faktor übernimmt den Zeitwertbonus
   if (baujahr < 1950) return -0.10;
   if (baujahr <= 1979) return -0.08;
   if (baujahr <= 1999) return -0.04;
@@ -193,17 +194,19 @@ function selectMarktpreis(marktdaten: ImmoScoutPrices | null, istHaus: boolean):
   return marktdaten.wohnung_kauf_preis ?? marktdaten.haus_kauf_preis;
 }
 
-function determineConfidenceAndSpread(brw: NormalizedBRW | null): {
-  konfidenz: 'hoch' | 'mittel' | 'gering';
-  spread: number;
-} {
-  if (!brw || brw.wert <= 0) {
-    return { konfidenz: 'gering', spread: 0.20 };
-  }
-  if (brw.schaetzung) {
+function determineConfidenceAndSpread(
+  brw: NormalizedBRW | null,
+  methode: 'sachwert-lite' | 'marktpreis-indikation',
+): { konfidenz: 'hoch' | 'mittel' | 'gering'; spread: number } {
+  // Marktpreis-Indikation: basiert auf Stadtdurchschnitt → inhärente Unsicherheit ±15%
+  // BRW-Qualität ist irrelevant, da der BRW nicht in die Berechnung eingeht
+  if (methode === 'marktpreis-indikation') {
     return { konfidenz: 'mittel', spread: 0.15 };
   }
-  return { konfidenz: 'hoch', spread: 0.08 };
+  // Sachwert-lite: BRW-Qualität bestimmt die Konfidenz
+  if (!brw || brw.wert <= 0) return { konfidenz: 'gering', spread: 0.20 };
+  if (brw.schaetzung)         return { konfidenz: 'mittel', spread: 0.15 };
+  return                              { konfidenz: 'hoch',   spread: 0.08 };
 }
 
 // ─── Hauptfunktion ───────────────────────────────────────────────────────────
@@ -236,6 +239,7 @@ export function buildBewertung(
   };
 
   // Gesamtfaktor: additiv (wie im Zapier-Code)
+  // Hinweis: Overlap-Korrektur (Neubau + Modernisierung) folgt nach hinweise-Initialisierung
   faktoren.gesamt =
     faktoren.baujahr +
     faktoren.modernisierung +
@@ -256,6 +260,22 @@ export function buildBewertung(
   let realistischerImmobilienwert = 0;
   const hinweise: string[] = [];
   const datenquellen: string[] = [];
+
+  // Überlapp-Korrektur: Neubau schließt positiven Modernisierungs-Bonus ein
+  // (Ein Neubau >= 2020 ist per Definition neuwertig — kein zusätzlicher Kernsanierungs-Bonus)
+  if (faktoren.neubau > 0 && faktoren.modernisierung > 0) {
+    faktoren.modernisierung = 0;
+    faktoren.gesamt =
+      faktoren.baujahr +
+      faktoren.energie +
+      faktoren.ausstattung +
+      faktoren.objektunterart +
+      faktoren.neubau +
+      faktoren.stichtag_korrektur;
+    hinweise.push(
+      'Neubau-Zuschlag schließt Modernisierungs-Bonus ein. Faktor-Überlapp wurde korrigiert.',
+    );
+  }
 
   if (bewertungsmethode === 'sachwert-lite') {
     // ─── Sachwert-lite: BRW + Grundstück + Marktdaten ───
@@ -310,7 +330,7 @@ export function buildBewertung(
   const realistischerQmPreis = Math.round(realistischerImmobilienwert / input.wohnflaeche);
 
   // Konfidenz + Spanne
-  const { konfidenz, spread } = determineConfidenceAndSpread(brw);
+  const { konfidenz, spread } = determineConfidenceAndSpread(brw, bewertungsmethode);
 
   const qmPreisSpanne = {
     min: Math.round(realistischerQmPreis * (1 - spread)),
