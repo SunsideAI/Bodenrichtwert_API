@@ -362,8 +362,17 @@ async function mobileSearch(geocode: string, realestatetype: string): Promise<Se
     const data = await res.json() as any;
     const listings: SearchListing[] = [];
 
+    // Debug: Top-Level-Keys der Response loggen
+    const topKeys = Object.keys(data || {});
+    console.log(`ImmoScout Mobile: Response keys: [${topKeys.join(', ')}]`);
+    if (topKeys.length > 0) {
+      // Erste 500 Zeichen der Response für Debugging
+      const preview = JSON.stringify(data).substring(0, 500);
+      console.log(`ImmoScout Mobile: Response preview: ${preview}`);
+    }
+
     // Response: items[] filtern nach type === 'EXPOSE_RESULT'
-    const items: any[] = data?.items || data?.resultlistEntries?.[0]?.resultlistEntry || [];
+    const items: any[] = data?.items || data?.resultlistEntries?.[0]?.resultlistEntry || data?.searchResponseModel?.resultlistEntries?.[0]?.resultlistEntry || [];
 
     for (const item of items) {
       // fredy-Format: item.type === 'EXPOSE_RESULT' → item.expose.item
@@ -437,21 +446,41 @@ export async function scrapeImmoScoutSearch(
   ortSlug: string,
   ortName: string,
 ): Promise<ImmoScoutPrices | null> {
-  // Geocode-Pfad bauen: /de/{bundesland}/{kreis}/{ort}
-  const geoParts = ['/de', bundeslandSlug];
-  if (kreisSlug) geoParts.push(kreisSlug);
-  geoParts.push(ortSlug);
-  const geocode = geoParts.join('/');
+  // Mehrere Geocode-Formate ausprobieren (Mobile API Doku ist unvollständig)
+  const geocodeCandidates: string[] = [];
 
-  // Haus + Wohnung parallel suchen
-  const [hausListings, wohnungListings] = await Promise.all([
-    mobileSearch(geocode, 'housebuy'),
-    mobileSearch(geocode, 'apartmentbuy'),
-  ]);
+  // Format 1: /de/{bundesland}/{kreis}/{ort}  (fredy-Doku)
+  if (kreisSlug) {
+    geocodeCandidates.push(`/de/${bundeslandSlug}/${kreisSlug}/${ortSlug}`);
+  }
+  // Format 2: /de/{bundesland}/{ort}  (ohne Kreis)
+  geocodeCandidates.push(`/de/${bundeslandSlug}/${ortSlug}`);
+  // Format 3: Nur Kreis-Ebene (breitere Suche)
+  if (kreisSlug) {
+    geocodeCandidates.push(`/de/${bundeslandSlug}/${kreisSlug}`);
+  }
+
+  let hausListings: SearchListing[] = [];
+  let wohnungListings: SearchListing[] = [];
+
+  for (const geocode of geocodeCandidates) {
+    const [haus, wohnung] = await Promise.all([
+      mobileSearch(geocode, 'housebuy'),
+      mobileSearch(geocode, 'apartmentbuy'),
+    ]);
+
+    if (haus.length + wohnung.length > 0) {
+      hausListings = haus;
+      wohnungListings = wohnung;
+      console.log(`ImmoScout Mobile: Treffer mit Geocode ${geocode}`);
+      break;
+    }
+    console.log(`ImmoScout Mobile: Geocode ${geocode} → keine Treffer, nächstes Format...`);
+  }
 
   const total = hausListings.length + wohnungListings.length;
   if (total === 0) {
-    console.warn(`ImmoScout Mobile: Keine Listings für ${ortName} (${geocode})`);
+    console.warn(`ImmoScout Mobile: Keine Listings für ${ortName} (alle Geocode-Formate getestet)`);
     return null;
   }
 
