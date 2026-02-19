@@ -1,11 +1,12 @@
 /**
- * ImmoScout24 Atlas Scraper (TypeScript)
+ * ImmoScout24 Atlas + Suche Scraper (TypeScript)
  *
  * Portiert die Kernlogik des Python-Scrapers (SunsideAI/Bodenrichtwer_Scraper)
  * nach TypeScript. Extrahiert _atlas_initialState JSON aus ImmoScout Atlas-Seiten
  * und gibt strukturierte Preisdaten zurück.
  *
  * Quelle: atlas.immobilienscout24.de/orte/deutschland/{bundesland}/{stadt}
+ * Fallback: immobilienscout24.de/Suche/de/{bundesland}/{kreis}/{ort}/haus-kaufen
  */
 export declare const ATLAS_BASE = "https://atlas.immobilienscout24.de";
 export interface ImmoScoutPrices {
@@ -45,6 +46,21 @@ export declare function slugify(name: string): string;
  * @param stadtteilSlug - optional: z.B. "schwabing"
  */
 export declare function scrapeImmoScoutAtlas(bundeslandSlug: string, stadtSlug: string, stadtteilSlug?: string): Promise<ImmoScoutPrices | null>;
+/**
+ * Baut den IS24-Suche-URL-Slug für einen Landkreis.
+ * "Landkreis Gifhorn" → "gifhorn-kreis"
+ * "Kreis Soest" → "soest-kreis"
+ * "Region Hannover" → "region-hannover"
+ * "" (kreisfrei) → ""
+ */
+export declare function buildSearchKreisSlug(county: string): string;
+/**
+ * Scrapt IS24 Suchseite und aggregiert Listing-Preise zu Marktdaten.
+ * Fallback für Orte ohne Atlas-Daten (z.B. Meine, Gifhorn-Kreis).
+ *
+ * URL-Format: /Suche/de/{bundesland}/{kreis}/{ort}/haus-kaufen
+ */
+export declare function scrapeImmoScoutSearch(bundeslandSlug: string, kreisSlug: string | undefined, ortSlug: string, ortName: string): Promise<ImmoScoutPrices | null>;
 /**
  * Scrapt die Stadtteile einer Stadt und gibt eine Liste zurück.
  * Nützlich um den nächsten Stadtteil per Koordinaten zu finden.
