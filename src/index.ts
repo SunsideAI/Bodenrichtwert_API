@@ -7,8 +7,11 @@ import { geocode } from './geocoder.js';
 import { routeToAdapter } from './state-router.js';
 import { cache, immoCache } from './cache.js';
 import { buildEnrichment } from './enrichment.js';
+import { buildBewertung } from './bewertung.js';
+import type { Bewertung } from './bewertung.js';
 import { scrapeImmoScoutAtlas, slugify } from './utils/immoscout-scraper.js';
 import type { ImmoScoutPrices } from './utils/immoscout-scraper.js';
+import type { NormalizedBRW } from './adapters/base.js';
 
 const app = new Hono();
 
@@ -78,11 +81,37 @@ function formatMarktdaten(prices: ImmoScoutPrices) {
 }
 
 // ==========================================
+// Bewertung aus Request-Kontext erstellen
+// ==========================================
+
+function buildBewertungFromContext(
+  body: Record<string, any>,
+  brw: NormalizedBRW | null,
+  marktdaten: ImmoScoutPrices | null,
+): Bewertung | null {
+  return buildBewertung(
+    {
+      art: body.art || null,
+      grundstuecksflaeche: body.grundstuecksflaeche || null,
+      wohnflaeche: body.wohnflaeche || null,
+      baujahr: body.baujahr || null,
+      objektunterart: body.objektunterart || null,
+      modernisierung: body.modernisierung || null,
+      energie: body.energie || null,
+      ausstattung: body.ausstattung || null,
+    },
+    brw,
+    marktdaten,
+  );
+}
+
+// ==========================================
 // POST /api/enrich — Hauptendpunkt für Zapier
 // ==========================================
 app.post('/api/enrich', async (c) => {
   const body = await c.req.json();
-  const { plz, ort, strasse, art, grundstuecksflaeche } = body;
+  const { plz, ort, strasse, art, grundstuecksflaeche,
+          wohnflaeche, baujahr, objektunterart, modernisierung, energie, ausstattung } = body;
 
   if (!plz && !strasse) {
     return c.json({
@@ -129,6 +158,7 @@ app.post('/api/enrich', async (c) => {
         bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') as string },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
+        bewertung: buildBewertungFromContext(body, cached, marktdaten),
         meta: { cached: true, response_time_ms: elapsed },
       });
     }
@@ -156,6 +186,7 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
+        bewertung: buildBewertungFromContext(body, null, marktdaten),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -181,6 +212,7 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
+        bewertung: buildBewertungFromContext(body, null, marktdaten),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -201,6 +233,7 @@ app.post('/api/enrich', async (c) => {
       bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
       marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
+      bewertung: buildBewertungFromContext(body, brw, marktdaten),
       meta: { cached: false, response_time_ms: elapsed },
     });
 
