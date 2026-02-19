@@ -54,7 +54,7 @@ export interface Bewertung {
     gebaeudewert: number;
     /** Ertragswert (nur bei MFH/ETW mit Mietdaten) */
     ertragswert: number | null;
-    bewertungsmethode: 'sachwert-lite' | 'marktpreis-indikation';
+    bewertungsmethode: 'sachwert-lite' | 'marktpreis-indikation' | 'vergleichswert';
     konfidenz: 'hoch' | 'mittel' | 'gering';
     faktoren: BewertungFaktoren;
     hinweise: string[];

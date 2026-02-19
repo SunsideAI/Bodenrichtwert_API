@@ -252,10 +252,11 @@ function runUnitTests() {
   {
     console.log('Test 10: Wohnung (nutzt wohnung_kauf_preis)');
     const input = mockInput({ art: 'Wohnung', wohnflaeche: 80, grundstuecksflaeche: null });
-    const markt = mockMarktdaten({ wohnung_kauf_preis: 4500, haus_kauf_preis: 3000 });
+    // wohnung_miete_preis=0 → kein 80/20, reiner Vergleichswert (testet Preis-Auswahl)
+    const markt = mockMarktdaten({ wohnung_kauf_preis: 4500, haus_kauf_preis: 3000, wohnung_miete_preis: 0 });
     const result = buildBewertung(input, null, markt);
     assert(result !== null, 'Result ist nicht null');
-    assert(result!.bewertungsmethode === 'marktpreis-indikation', 'Methode = marktpreis-indikation (Wohnung ohne Grundstück)');
+    assert(result!.bewertungsmethode === 'vergleichswert', 'Methode = vergleichswert (Wohnung mit Marktdaten)');
     // Basis sollte wohnung_kauf_preis (4500) sein, nicht haus_kauf (3000)
     const baseWert = 4500 * 80 * (1 + result!.faktoren.gesamt);
     assertApprox(result!.realistischer_immobilienwert, Math.round(baseWert), 1, 'Nutzt wohnung_kauf_preis als Basis');
@@ -651,6 +652,69 @@ function runUnitTests() {
       assert(result!.qm_preis_spanne.max > 0, `[${name}] QM-Spanne max > 0`);
     }
     console.log('');
+  }
+
+  // 35. Vergleichswertverfahren: ETW mit Marktdaten → Methode = vergleichswert, bodenwert = 0
+  {
+    console.log('Test 35: ETW mit Marktdaten → Vergleichswertverfahren, bodenwert=0');
+    const input = mockInput({ art: 'Wohnung', wohnflaeche: 54, baujahr: 1993, grundstuecksflaeche: null });
+    // wohnung_miete_preis=0 → kein 80/20, reiner Vergleichswert (testet Formel)
+    const markt = mockMarktdaten({ wohnung_kauf_preis: 2100, haus_kauf_preis: 3000, wohnung_miete_preis: 0 });
+    const result = buildBewertung(input, null, markt);
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.bewertungsmethode === 'vergleichswert', 'Methode = vergleichswert');
+    assert(result!.bodenwert === 0, `Bodenwert = 0 (im Vergleichswert enthalten, got ${result!.bodenwert})`);
+    // Wert: 2100 × 54 × (1 + faktoren) — faktoren.baujahr negativ für 1993
+    const expectedBase = 2100 * 54 * (1 + result!.faktoren.gesamt);
+    assertApprox(result!.realistischer_immobilienwert, Math.round(expectedBase), 1, 'Vergleichswert = marktPreis × WF × Faktor');
+    assert(result!.realistischer_immobilienwert > 0, 'Immobilienwert > 0');
+    assert(result!.datenquellen.some(d => d.includes('Vergleichswertverfahren')), 'Datenquelle Vergleichswertverfahren');
+    assert(result!.hinweise.some(h => h.toLowerCase().includes('vergleichswert') || h.toLowerCase().includes('bodenwertanteil')), 'Hinweis zu Vergleichswert');
+    console.log(`    → Methode: ${result!.bewertungsmethode}, Wert: ${result!.realistischer_immobilienwert}€, Bodenwert: ${result!.bodenwert}€\n`);
+  }
+
+  // 36. ETW mit Markt + Mietdaten → Gewichtung 80% Vergleich + 20% Ertrag
+  {
+    console.log('Test 36: ETW mit Markt + Mietdaten → 80/20 Gewichtung');
+    const input = mockInput({ art: 'Wohnung', wohnflaeche: 80, grundstuecksflaeche: null });
+    const markt = mockMarktdaten({ wohnung_kauf_preis: 3000, wohnung_miete_preis: 12 });
+    const result = buildBewertung(input, null, markt);
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.bewertungsmethode === 'vergleichswert', 'Methode = vergleichswert');
+    assert(result!.ertragswert !== null && result!.ertragswert! > 0, `Ertragswert vorhanden (${result!.ertragswert})`);
+    // Wenn Ertragswert vorhanden → Spread ±6% (hoch)
+    const spread = (result!.immobilienwert_spanne.max - result!.realistischer_immobilienwert) / result!.realistischer_immobilienwert;
+    assertApprox(spread, 0.06, 0.01, 'Spread ≈ 6% (hoch, mit Ertragswert)');
+    // Endwert ist zwischen Vergleichswert und Ertragswert
+    assert(result!.realistischer_immobilienwert > 0, 'Gewichteter Wert > 0');
+    console.log(`    → Wert: ${result!.realistischer_immobilienwert}€, Ertragswert: ${result!.ertragswert}€, Spread: ${(spread * 100).toFixed(1)}%\n`);
+  }
+
+  // 37. ETW ohne Marktdaten → Bundesdurchschnitt (kein NHK)
+  {
+    console.log('Test 37: ETW ohne Marktdaten → Bundesdurchschnitt, kein NHK');
+    const input = mockInput({ art: 'Wohnung', wohnflaeche: 54, baujahr: 1993, grundstuecksflaeche: null });
+    const result = buildBewertung(input, null, null); // kein BRW, keine Marktdaten
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.bewertungsmethode === 'marktpreis-indikation', 'Methode = marktpreis-indikation (Bundesdurchschnitt)');
+    assert(!result!.datenquellen.includes('NHK 2010 (ImmoWertV 2022)'), 'Keine NHK-Datenquelle für ETW');
+    assert(result!.konfidenz === 'gering', 'Konfidenz = gering (Bundesdurchschnitt)');
+    // Bundesdurchschnitt Wohnung 2800€/m² → deutlich höher als NHK-Ergebnis (~1371€/m²)
+    assert(result!.realistischer_qm_preis > 1500, `QM-Preis > 1500 (Bundesdurchschnitt, got ${result!.realistischer_qm_preis})`);
+    assert(result!.hinweise.some(h => h.includes('Bundesdurchschnitt')), 'Hinweis zu Bundesdurchschnitt');
+    console.log(`    → Methode: ${result!.bewertungsmethode}, QM: ${result!.realistischer_qm_preis}€/m², Konfidenz: ${result!.konfidenz}\n`);
+  }
+
+  // 38. EFH ohne Grundfläche → weiterhin sachwert-lite mit GF-Schätzung (kein Rückschritt)
+  {
+    console.log('Test 38: EFH ohne Grundfläche → sachwert-lite mit GF-Schätzung (kein Rückschritt)');
+    const input = mockInput({ art: 'Einfamilienhaus', wohnflaeche: 140, grundstuecksflaeche: null });
+    const result = buildBewertung(input, mockBRW(), null);
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.bewertungsmethode === 'sachwert-lite', 'Methode = sachwert-lite (EFH mit BRW)');
+    assert(result!.bodenwert > 0, `Bodenwert > 0 für EFH (${result!.bodenwert})`);
+    assert(result!.hinweise.some(h => h.includes('geschätzt') || h.includes('Grundstück')), 'Hinweis zu geschätzter GF');
+    console.log(`    → Methode: ${result!.bewertungsmethode}, Bodenwert: ${result!.bodenwert}€\n`);
   }
 
   // Zusammenfassung
