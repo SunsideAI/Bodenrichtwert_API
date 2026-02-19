@@ -11,6 +11,25 @@
 export const ATLAS_BASE = 'https://atlas.immobilienscout24.de';
 const MOBILE_API = 'https://api.mobile.immobilienscout24.de';
 const MOBILE_UA = 'ImmoScout_27.12_26.2_._';
+/**
+ * Deutsche Zahlen-Notation parsen: "165.000" → 165000, "78" → 78, "129,5" → 129.5
+ * Punkte sind Tausender-Trenner, Komma ist Dezimalzeichen.
+ */
+function parseGermanNumber(s) {
+    if (!s)
+        return 0;
+    // Wenn Komma vorhanden → Dezimalzeichen, Punkte sind Tausender
+    if (s.includes(',')) {
+        return parseFloat(s.replace(/\./g, '').replace(',', '.'));
+    }
+    // Nur Punkte: Tausender-Trenner wenn >3 Ziffern nach letztem Punkt
+    // "165.000" → Tausender, "3.5" → Dezimal
+    const parts = s.split('.');
+    if (parts.length > 1 && parts[parts.length - 1].length === 3) {
+        return parseFloat(s.replace(/\./g, ''));
+    }
+    return parseFloat(s);
+}
 // ─── Rotierende User-Agents (aus Python-Scraper) ──────────────────────────
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -267,8 +286,6 @@ async function mobileSearch(geocode, realestatetype) {
             return [];
         }
         const rawText = await res.text();
-        console.log(`ImmoScout Mobile: Raw response length=${rawText.length}, first 600 chars:`);
-        console.log(rawText.substring(0, 600));
         let data;
         try {
             data = JSON.parse(rawText);
@@ -278,30 +295,12 @@ async function mobileSearch(geocode, realestatetype) {
             return [];
         }
         const listings = [];
-        // Debug: Top-Level-Keys der Response loggen
-        const topKeys = Object.keys(data || {});
-        console.log(`ImmoScout Mobile: Response keys: [${topKeys.join(', ')}]`);
-        if (topKeys.length > 0) {
-            const preview = JSON.stringify(data).substring(0, 500);
-            console.log(`ImmoScout Mobile: Response preview: ${preview}`);
-        }
         // Mobile API Response: { resultListItems: [{ type, item: {...} }] }
         const resultListItems = data?.resultListItems
             || data?.items
             || data?.resultlistEntries?.[0]?.resultlistEntry
             || [];
-        // Debug: Erstes Item komplett loggen um Struktur zu verstehen
-        if (resultListItems.length > 0) {
-            const firstItem = resultListItems[0];
-            const innerItem = firstItem?.item || firstItem?.expose?.item || firstItem;
-            const innerKeys = Object.keys(innerItem || {});
-            console.log(`ImmoScout Mobile: First item type=${firstItem?.type}, inner keys: [${innerKeys.join(', ')}]`);
-            // Komplettes erstes Item (ohne Bilder) loggen
-            const stripped = { ...innerItem };
-            delete stripped.pictures;
-            delete stripped.titlePicture;
-            console.log(`ImmoScout Mobile: First item data: ${JSON.stringify(stripped).substring(0, 800)}`);
-        }
+        console.log(`ImmoScout Mobile: ${resultListItems.length} resultListItems für ${realestatetype}`);
         for (const entry of resultListItems) {
             if (entry?.type && entry.type !== 'EXPOSE_RESULT')
                 continue;
@@ -311,52 +310,60 @@ async function mobileSearch(geocode, realestatetype) {
                 continue;
             let price = 0;
             let area = 0;
-            // 1. Attributes-Array durchsuchen (sections > attributes)
-            const attrSections = expose?.attributes || expose?.sections || [];
-            for (const section of attrSections) {
-                const attrs = section?.attributes || (Array.isArray(section) ? section : [section]);
-                for (const attr of attrs) {
-                    const label = String(attr?.label || attr?.title || '').toLowerCase();
-                    const text = String(attr?.text || attr?.value || '');
-                    if (!price && (label.includes('kaufpreis') || label.includes('preis'))) {
-                        const parsed = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
-                        if (parsed > 0)
-                            price = parsed;
-                    }
-                    if (!area && (label.includes('wohnfläche') || label.includes('fläche'))) {
-                        const parsed = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
-                        if (parsed > 0)
-                            area = parsed;
+            // Mobile API: attributes ist ein flaches Array mit leeren Labels
+            // Format: [{"label":"","value":"165.000 €"},{"label":"","value":"78 m²"},{"label":"","value":"2 Zi."}]
+            const attrs = expose?.attributes || [];
+            for (const attr of attrs) {
+                const val = String(attr?.value || attr?.text || '');
+                const label = String(attr?.label || attr?.title || '').toLowerCase();
+                // Preis erkennen: "165.000 €" oder "1.234.567 €" oder Label enthält "preis"
+                if (!price && (val.includes('€') || label.includes('preis'))) {
+                    // "165.000 €" → "165000" → 165000
+                    const cleaned = val.replace(/[^\d,.]/g, '');
+                    // Deutsche Notation: Punkte sind Tausender-Trenner, Komma ist Dezimal
+                    const parsed = parseGermanNumber(cleaned);
+                    if (parsed > 0)
+                        price = parsed;
+                }
+                // Fläche erkennen: "78 m²" oder "129,5 m²" oder Label enthält "fläche"
+                if (!area && (val.includes('m²') || label.includes('fläche'))) {
+                    const cleaned = val.replace(/[^\d,.]/g, '');
+                    const parsed = parseGermanNumber(cleaned);
+                    if (parsed > 0)
+                        area = parsed;
+                }
+            }
+            // Fallback: Verschachtelte sections > attributes
+            if (!price || !area) {
+                const sections = expose?.sections || [];
+                for (const section of sections) {
+                    const sectionAttrs = section?.attributes || [];
+                    for (const attr of sectionAttrs) {
+                        const label = String(attr?.label || '').toLowerCase();
+                        const val = String(attr?.value || attr?.text || '');
+                        if (!price && (label.includes('preis') || val.includes('€'))) {
+                            const parsed = parseGermanNumber(val.replace(/[^\d,.]/g, ''));
+                            if (parsed > 0)
+                                price = parsed;
+                        }
+                        if (!area && (label.includes('fläche') || val.includes('m²'))) {
+                            const parsed = parseGermanNumber(val.replace(/[^\d,.]/g, ''));
+                            if (parsed > 0)
+                                area = parsed;
+                        }
                     }
                 }
             }
-            // 2. Direkte Felder am Expose-Objekt
+            // Fallback: Direkte Felder
             if (!price) {
                 const p = expose?.price ?? expose?.buyingPrice ?? expose?.purchasePrice;
                 if (p)
-                    price = typeof p === 'number' ? p : parseFloat(String(p).replace(/[^\d,]/g, '').replace(',', '.'));
+                    price = typeof p === 'number' ? p : parseGermanNumber(String(p).replace(/[^\d,.]/g, ''));
             }
             if (!area) {
                 const a = expose?.livingSpace ?? expose?.livingArea ?? expose?.area;
                 if (a)
-                    area = typeof a === 'number' ? a : parseFloat(String(a).replace(/[^\d,]/g, '').replace(',', '.'));
-            }
-            // 3. keyValues / features Array (manche API-Versionen)
-            if ((!price || !area) && expose?.keyValues) {
-                for (const kv of Array.isArray(expose.keyValues) ? expose.keyValues : []) {
-                    const key = String(kv?.key || kv?.label || '').toLowerCase();
-                    const val = kv?.value ?? kv?.text ?? '';
-                    if (!price && (key.includes('preis') || key.includes('price'))) {
-                        const parsed = parseFloat(String(val).replace(/[^\d,]/g, '').replace(',', '.'));
-                        if (parsed > 0)
-                            price = parsed;
-                    }
-                    if (!area && (key.includes('fläche') || key.includes('area') || key.includes('space'))) {
-                        const parsed = parseFloat(String(val).replace(/[^\d,]/g, '').replace(',', '.'));
-                        if (parsed > 0)
-                            area = parsed;
-                    }
-                }
+                    area = typeof a === 'number' ? a : parseGermanNumber(String(a).replace(/[^\d,.]/g, ''));
             }
             if (price > 10000 && area > 10) {
                 listings.push({
@@ -366,7 +373,11 @@ async function mobileSearch(geocode, realestatetype) {
                 });
             }
         }
-        console.log(`ImmoScout Mobile: ${listings.length} Listings (${realestatetype})`);
+        console.log(`ImmoScout Mobile: ${listings.length}/${resultListItems.length} Listings extrahiert (${realestatetype})`);
+        if (listings.length > 0) {
+            const sample = listings.slice(0, 3).map(l => `${l.price}€/${l.livingSpace}m²=${l.pricePerSqm}€/m²`);
+            console.log(`ImmoScout Mobile: Beispiele: ${sample.join(', ')}`);
+        }
         return listings;
     }
     catch (err) {
