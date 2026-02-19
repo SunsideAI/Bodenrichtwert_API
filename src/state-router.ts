@@ -12,11 +12,13 @@ import { SachsenAdapter } from './adapters/sachsen.js';
 import { SachsenAnhaltAdapter } from './adapters/sachsen-anhalt.js';
 import { SchleswigHolsteinAdapter } from './adapters/schleswig-holstein.js';
 import { BremenAdapter } from './adapters/bremen.js';
+import { BayernAdapter } from './adapters/bayern.js';
+import { SaarlandAdapter } from './adapters/saarland.js';
 import { FallbackAdapter } from './adapters/fallback.js';
 
 /**
  * Adapter-Registry: Bundesland → Adapter-Instanz.
- * 16/16 Bundesländer abgedeckt – 13 automatisch, 3 Fallback.
+ * 16/16 Bundesländer abgedeckt – 15 automatisch, 1 Fallback.
  */
 const adapterRegistry: Record<string, BodenrichtwertAdapter> = {
   // Tier 1: WFS-Adapter (freie Daten, hohe Qualität)
@@ -38,10 +40,12 @@ const adapterRegistry: Record<string, BodenrichtwertAdapter> = {
   // Tier 1b: WFS-Adapter (freie Daten, gleiche NI-Infrastruktur)
   'Bremen': new BremenAdapter(),
 
-  // Tier 3: Fallback (kein freier Zugang / Lizenzeinschränkungen)
-  'Bayern': new FallbackAdapter('Bayern'),
+  // Tier 2b: WMS-Adapter (GetFeatureInfo + WFS, eingeschränktere Lizenzen)
+  'Bayern': new BayernAdapter(),
+  'Saarland': new SaarlandAdapter(),
+
+  // Tier 3: Fallback (kein landesweiter Endpunkt verfügbar)
   'Baden-Württemberg': new FallbackAdapter('Baden-Württemberg'),
-  'Saarland': new FallbackAdapter('Saarland'),
 };
 
 /**

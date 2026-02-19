@@ -11,23 +11,11 @@ interface FallbackConfig {
 }
 
 const FALLBACK_CONFIGS: Record<string, FallbackConfig> = {
-  'Bayern': {
-    state: 'Bayern',
-    stateCode: 'BY',
-    reason: 'Bayern stellt keine freien WFS-Daten bereit (kostenpflichtig nach BayKostG). Bitte BORIS-Bayern für manuelle Abfrage nutzen.',
-    borisUrl: 'https://www.boris-bayern.de',
-  },
   'Baden-Württemberg': {
     state: 'Baden-Württemberg',
     stateCode: 'BW',
-    reason: 'Baden-Württemberg erlaubt seit 2024 freie Ansicht, schließt aber kommerzielle Nutzung explizit aus.',
-    borisUrl: 'https://www.boris-bw.de',
-  },
-'Saarland': {
-    state: 'Saarland',
-    stateCode: 'SL',
-    reason: 'Saarland erlaubt nur Ansicht im Geoportal, Einbindung in andere Anwendungen ist nicht gestattet.',
-    borisUrl: 'https://geoportal.saarland.de/article/Bodenrichtwerte/',
+    reason: 'Baden-Württemberg hat keinen landesweiten WMS/WFS-Endpunkt. Einzelne Kommunen (Stuttgart, Heidelberg etc.) haben eigene WMS-Dienste, aber keine einheitliche Abdeckung.',
+    borisUrl: 'https://www.gutachterausschuesse-bw.de/borisbw/',
   },
 };
 
