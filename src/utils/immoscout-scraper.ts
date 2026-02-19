@@ -354,19 +354,29 @@ async function mobileSearch(geocode: string, realestatetype: string): Promise<Se
       signal: AbortSignal.timeout(15000),
     });
 
+    console.log(`ImmoScout Mobile: HTTP ${res.status} ${res.statusText} for ${realestatetype}`);
+
     if (!res.ok) {
-      console.warn(`ImmoScout Mobile: HTTP ${res.status} for ${realestatetype}`);
       return [];
     }
 
-    const data = await res.json() as any;
+    const rawText = await res.text();
+    console.log(`ImmoScout Mobile: Raw response length=${rawText.length}, first 600 chars:`);
+    console.log(rawText.substring(0, 600));
+
+    let data: any;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      console.warn(`ImmoScout Mobile: JSON parse failed for ${realestatetype}`);
+      return [];
+    }
     const listings: SearchListing[] = [];
 
     // Debug: Top-Level-Keys der Response loggen
     const topKeys = Object.keys(data || {});
     console.log(`ImmoScout Mobile: Response keys: [${topKeys.join(', ')}]`);
     if (topKeys.length > 0) {
-      // Erste 500 Zeichen der Response für Debugging
       const preview = JSON.stringify(data).substring(0, 500);
       console.log(`ImmoScout Mobile: Response preview: ${preview}`);
     }
