@@ -9,9 +9,13 @@ import { cache, immoCache } from './cache.js';
 import { buildEnrichment } from './enrichment.js';
 import { buildBewertung } from './bewertung.js';
 import type { Bewertung } from './bewertung.js';
-import { scrapeImmoScoutAtlas, slugify } from './utils/immoscout-scraper.js';
+import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, slugify } from './utils/immoscout-scraper.js';
 import type { ImmoScoutPrices } from './utils/immoscout-scraper.js';
 import type { NormalizedBRW } from './adapters/base.js';
+import { fetchPreisindex } from './utils/bundesbank.js';
+import type { PreisindexEntry } from './utils/bundesbank.js';
+import { fetchImmobilienrichtwert } from './utils/nrw-irw.js';
+import type { NRWImmobilienrichtwert } from './utils/nrw-irw.js';
 
 const app = new Hono();
 
@@ -62,6 +66,75 @@ async function fetchMarktdaten(
 }
 
 /**
+ * Holt Stadtteil-genaue ImmoScout-Daten und matcht gegen den Geocoder-District.
+ * Gibt das beste Match zurück (Stadtteil > City-Level).
+ */
+async function fetchDistrictMarktdaten(
+  state: string,
+  city: string,
+  district: string,
+  cityPrices: ImmoScoutPrices | null,
+): Promise<ImmoScoutPrices | null> {
+  if (!district || !city) return cityPrices;
+
+  try {
+    const bundeslandSlug = slugify(state);
+    const stadtSlug = slugify(city);
+    const districts = await scrapeImmoScoutDistricts(bundeslandSlug, stadtSlug);
+
+    if (districts.length === 0) return cityPrices;
+
+    // Matching: exact → contains → fallback auf city-level
+    const target = district.toLowerCase().trim();
+    const exact = districts.find((d) => d.stadtteil?.toLowerCase().trim() === target);
+    if (exact) {
+      console.log(`ImmoScout: Stadtteil-Match (exakt): ${exact.stadtteil}`);
+      return exact;
+    }
+
+    const partial = districts.find(
+      (d) =>
+        d.stadtteil?.toLowerCase().includes(target) ||
+        target.includes(d.stadtteil?.toLowerCase() ?? ''),
+    );
+    if (partial) {
+      console.log(`ImmoScout: Stadtteil-Match (partial): ${partial.stadtteil}`);
+      return partial;
+    }
+
+    console.log(`ImmoScout: Kein Stadtteil-Match für "${district}" in ${city}`);
+    return cityPrices;
+  } catch (err) {
+    console.warn('ImmoScout Stadtteil-Abfrage Fehler:', err);
+    return cityPrices;
+  }
+}
+
+// ─── Bundesbank Preisindex (gecacht) ─────────────────────────────────────────
+
+let _preisindexCache: { data: PreisindexEntry[]; fetchedAt: number } | null = null;
+const PREISINDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 Tage
+
+async function getPreisindex(): Promise<PreisindexEntry[] | null> {
+  if (_preisindexCache && Date.now() - _preisindexCache.fetchedAt < PREISINDEX_TTL_MS) {
+    return _preisindexCache.data;
+  }
+
+  try {
+    const data = await fetchPreisindex();
+    if (data.length > 0) {
+      _preisindexCache = { data, fetchedAt: Date.now() };
+      console.log(`Bundesbank Preisindex: ${data.length} Quartalswerte geladen`);
+      return data;
+    }
+  } catch (err) {
+    console.warn('Bundesbank Preisindex Fehler:', err);
+  }
+
+  return _preisindexCache?.data ?? null;
+}
+
+/**
  * Konvertiert ImmoScoutPrices in das kompakte API-Response-Format.
  */
 function formatMarktdaten(prices: ImmoScoutPrices) {
@@ -97,10 +170,25 @@ function parseNum(val: any): number | null {
   return isNaN(n) ? null : n;
 }
 
+/**
+ * Mappt die Immobilienart auf einen NRW-IRW-Teilmarkt-Filter.
+ */
+function mapArtToTeilmarkt(art: string | undefined): string | undefined {
+  if (!art) return undefined;
+  const a = art.toLowerCase();
+  if (a.includes('wohnung') || a.includes('etw') || a.includes('eigentum')) return 'ETW';
+  if (a.includes('mehrfamilien') || a.includes('mfh')) return 'MFH';
+  if (a.includes('reihen') || a.includes('doppel') || a.includes('rdh')) return 'RDH';
+  // Default für Einfamilienhaus, Zweifamilienhaus etc.
+  return 'EFH';
+}
+
 function buildBewertungFromContext(
   body: Record<string, any>,
   brw: NormalizedBRW | null,
   marktdaten: ImmoScoutPrices | null,
+  preisindex?: PreisindexEntry[] | null,
+  irw?: NRWImmobilienrichtwert | null,
 ): Bewertung | null {
   return buildBewertung(
     {
@@ -115,6 +203,8 @@ function buildBewertungFromContext(
     },
     brw,
     marktdaten,
+    preisindex,
+    irw,
   );
 }
 
@@ -147,19 +237,33 @@ app.post('/api/enrich', async (c) => {
       }, 400);
     }
 
-    // 2. ImmoScout-Marktdaten parallel starten (blockiert nie)
+    // 2. ImmoScout-Marktdaten + Bundesbank-Preisindex + NRW-IRW parallel starten (blockiert nie)
     const marktdatenPromise = fetchMarktdaten(geo.state, geo.city)
+      .then((cityPrices) => fetchDistrictMarktdaten(geo.state, geo.city, geo.district, cityPrices))
       .catch((err) => {
         console.warn('ImmoScout Marktdaten Fehler:', err);
         return null;
       });
+    const preisindexPromise = getPreisindex().catch(() => null);
+
+    // NRW-IRW nur für Nordrhein-Westfalen abrufen (Teilmarkt aus art ableiten)
+    const irwPromise: Promise<NRWImmobilienrichtwert | null> =
+      geo.state === 'Nordrhein-Westfalen'
+        ? fetchImmobilienrichtwert(
+            geo.lat, geo.lon,
+            mapArtToTeilmarkt(art),
+          ).catch((err) => {
+            console.warn('NRW IRW Fehler:', err);
+            return null;
+          })
+        : Promise.resolve(null);
 
     // 3. BRW-Cache prüfen
     const cacheKey = `${geo.lat.toFixed(5)}:${geo.lon.toFixed(5)}`;
     const cached = cache.get(cacheKey);
 
     if (cached) {
-      const marktdaten = await marktdatenPromise;
+      const [marktdaten, preisindex, irw] = await Promise.all([marktdatenPromise, preisindexPromise, irwPromise]);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'success',
@@ -171,7 +275,7 @@ app.post('/api/enrich', async (c) => {
         bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') as string },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, cached, marktdaten),
+        bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw),
         meta: { cached: true, response_time_ms: elapsed },
       });
     }
@@ -180,7 +284,7 @@ app.post('/api/enrich', async (c) => {
     const adapter = routeToAdapter(geo.state);
 
     if (adapter.isFallback) {
-      const marktdaten = await marktdatenPromise;
+      const [marktdaten, preisindex, irw] = await Promise.all([marktdatenPromise, preisindexPromise, irwPromise]);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'manual_required',
@@ -199,14 +303,18 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, null, marktdaten),
+        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
 
-    // 5. BRW + Marktdaten parallel abfragen
-    const brw = await adapter.getBodenrichtwert(geo.lat, geo.lon);
-    const marktdaten = await marktdatenPromise;
+    // 5. BRW + Marktdaten + Preisindex + IRW parallel abfragen
+    const [brw, marktdaten, preisindex, irw] = await Promise.all([
+      adapter.getBodenrichtwert(geo.lat, geo.lon),
+      marktdatenPromise,
+      preisindexPromise,
+      irwPromise,
+    ]);
     const elapsed = Date.now() - start;
 
     if (!brw) {
@@ -225,7 +333,7 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, null, marktdaten),
+        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -246,7 +354,7 @@ app.post('/api/enrich', async (c) => {
       bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
       marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
-      bewertung: buildBewertungFromContext(body, brw, marktdaten),
+      bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw),
       meta: { cached: false, response_time_ms: elapsed },
     });
 
