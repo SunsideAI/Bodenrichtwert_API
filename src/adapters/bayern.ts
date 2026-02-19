@@ -3,16 +3,19 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
 /**
  * Bayern Adapter
  *
- * Nutzt den offiziellen Bayern-Geoportal WMS GetFeatureInfo Endpunkt.
- * Mehrere WMS-URLs werden probiert, da geoservices.bayern.de teilweise
- * Anfragen ohne Browser-Headers blockiert (403 / leere GetCapabilities).
+ * Nutzt das neue VBORIS-Portal (seit August 2025):
+ * https://geoportal.bayern.de/bodenrichtwerte/vboris
  *
- * Lösung: Browser-ähnliche Headers (User-Agent + Referer + Origin)
- * wie beim SH-Adapter (schleswig-holstein.ts:36-45).
+ * Die alte URL (geoservices.bayern.de/wms/v1/ogc_bodenrichtwerte.cgi)
+ * gibt seit ~2025 HTTP 404 zurück.
  *
- * Layer: bodenrichtwerte_aktuell (bestätigt via Geoportal Bayern Capabilities Viewer)
- * CRS: EPSG:25832 nativ, EPSG:4326 wird unterstützt
- * BBOX (WMS 1.1.1, EPSG:4326): minlon,minlat,maxlon,maxlat
+ * Layer: bodenrichtwerte_aktuell (queryable=1, bestätigt via GetCapabilities)
+ * CRS: EPSG:4326, EPSG:25832, EPSG:3857, EPSG:31468 (alle bestätigt)
+ * GetFeatureInfo-Formate: text/plain, text/html, application/vnd.ogc.gml
+ * WMS-Version: 1.1.1
+ *
+ * HINWEIS: Manche Gutachterausschüsse zeigen den BRW-Wert frei,
+ * andere geben "Information gebührenpflichtig" zurück (z.B. München).
  *
  * Lizenz: © Bayerische Vermessungsverwaltung (www.geodaten.bayern.de)
  */
@@ -21,28 +24,16 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   stateCode = 'BY';
   isFallback = false;
 
-  // Mehrere WMS-URLs (Fallback-Kette)
+  // VBORIS-Portal (bestätigt via curl, GetCapabilities 200 OK)
   private readonly wmsUrls = [
-    'https://geoservices.bayern.de/wms/v1/ogc_bodenrichtwerte.cgi',
-    'https://geoservices.bayern.de/wms/v2/ogc_bodenrichtwerte.cgi',
-    'https://www.geodaten.bayern.de/ogc/ogc_bodenrichtwerte.cgi',
+    'https://geoportal.bayern.de/bodenrichtwerte/vboris',
   ];
 
-  // Bekannte Layer (bestätigt via Geoportal-Viewer)
+  // Bestätigt via GetCapabilities XML
   private layerCandidates = [
     'bodenrichtwerte_aktuell',
-    'bodenrichtwerte',
-    '0',
+    'Bodenrichtwerte',
   ];
-
-  // Browser-ähnliche Headers (wie SH-Pattern, um 403-Blockaden zu umgehen)
-  private getHeaders(): Record<string, string> {
-    return {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Referer': 'https://geoportal.bayern.de/',
-      'Origin': 'https://geoportal.bayern.de',
-    };
-  }
 
   private discoveredLayers: Record<string, string[]> = {};
 
@@ -61,7 +52,6 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   }
 
   private async queryEndpoint(lat: number, lon: number, wmsUrl: string): Promise<NormalizedBRW | null> {
-    // Layer-Discovery (einmal pro URL)
     if (!this.discoveredLayers[wmsUrl]) {
       this.discoveredLayers[wmsUrl] = await this.discoverLayers(wmsUrl);
       console.log(`BY WMS ${wmsUrl}: Discovered layers:`, this.discoveredLayers[wmsUrl]);
@@ -71,17 +61,20 @@ export class BayernAdapter implements BodenrichtwertAdapter {
       ? this.discoveredLayers[wmsUrl]
       : this.layerCandidates;
 
+    // VBORIS unterstützt: text/plain, text/html, application/vnd.ogc.gml
+    const formats = ['text/plain', 'application/vnd.ogc.gml', 'text/html'] as const;
+
     for (const layer of layersToTry) {
-      // Strategie 1: EPSG:4326 (direkt mit lat/lon)
-      for (const fmt of ['text/xml', 'text/plain', 'text/html', 'application/json'] as const) {
+      // EPSG:4326 direkt mit lat/lon (bestätigt via curl)
+      for (const fmt of formats) {
         try {
           const result = await this.queryWms(lat, lon, wmsUrl, layer, fmt, 'EPSG:4326');
           if (result) return result;
         } catch { /* nächste Kombination */ }
       }
 
-      // Strategie 2: EPSG:25832 (UTM-Konvertierung)
-      for (const fmt of ['text/xml', 'text/plain', 'text/html'] as const) {
+      // Fallback: EPSG:25832 (UTM-Konvertierung)
+      for (const fmt of formats) {
         try {
           const result = await this.queryWms(lat, lon, wmsUrl, layer, fmt, 'EPSG:25832');
           if (result) return result;
@@ -93,55 +86,42 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   }
 
   private async discoverLayers(wmsUrl: string): Promise<string[]> {
-    for (const version of ['1.1.1', '1.3.0']) {
-      try {
-        const params = new URLSearchParams({
-          SERVICE: 'WMS',
-          VERSION: version,
-          REQUEST: 'GetCapabilities',
-        });
+    try {
+      const params = new URLSearchParams({
+        SERVICE: 'WMS',
+        VERSION: '1.1.1',
+        REQUEST: 'GetCapabilities',
+      });
 
-        const res = await fetch(`${wmsUrl}?${params}`, {
-          headers: this.getHeaders(),
-          signal: AbortSignal.timeout(10000),
-        });
+      const res = await fetch(`${wmsUrl}?${params}`, {
+        signal: AbortSignal.timeout(10000),
+      });
 
-        if (!res.ok) {
-          console.warn(`BY GetCapabilities ${wmsUrl} (v${version}): HTTP ${res.status}`);
-          continue;
-        }
-
-        const xml = await res.text();
-
-        // Debug: Erste 500 Zeichen loggen um die Antwort zu verstehen
-        console.log(`BY GetCapabilities ${wmsUrl} (v${version}) (500 chars):`, xml.substring(0, 500));
-
-        const layers: string[] = [];
-
-        // Queryable Layer bevorzugen
-        const queryableRegex = /<Layer[^>]*queryable=["']1["'][^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
-        let match;
-        while ((match = queryableRegex.exec(xml)) !== null) {
-          layers.push(match[1].trim());
-        }
-
-        if (layers.length === 0) {
-          const nameRegex = /<Layer[^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
-          while ((match = nameRegex.exec(xml)) !== null) {
-            const name = match[1].trim();
-            if (name && !name.toLowerCase().includes('wms') && !name.toLowerCase().includes('service')) {
-              layers.push(name);
-            }
-          }
-        }
-
-        if (layers.length > 0) {
-          console.log(`BY GetCapabilities (v${version}): Found ${layers.length} layers`);
-          return layers;
-        }
-      } catch (err) {
-        console.warn(`BY GetCapabilities (v${version}) error:`, err);
+      if (!res.ok) {
+        console.warn(`BY GetCapabilities ${wmsUrl}: HTTP ${res.status}`);
+        return [];
       }
+
+      const xml = await res.text();
+      const layers: string[] = [];
+
+      // Queryable Layer bevorzugen
+      const queryableRegex = /<Layer[^>]*queryable=["']1["'][^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
+      let match;
+      while ((match = queryableRegex.exec(xml)) !== null) {
+        const name = match[1].trim();
+        // Filter OGC:WMS service name
+        if (name && !name.startsWith('OGC:')) {
+          layers.push(name);
+        }
+      }
+
+      if (layers.length > 0) {
+        console.log(`BY GetCapabilities: Found ${layers.length} layers:`, layers);
+        return layers;
+      }
+    } catch (err) {
+      console.warn(`BY GetCapabilities error:`, err);
     }
     return [];
   }
@@ -184,16 +164,10 @@ export class BayernAdapter implements BodenrichtwertAdapter {
     });
 
     const res = await fetch(`${wmsUrl}?${params}`, {
-      headers: this.getHeaders(),
       signal: AbortSignal.timeout(15000),
     });
 
-    if (!res.ok) {
-      if (res.status === 403) {
-        console.warn(`BY WMS [${layer}/${srs}] 403 Forbidden — Server blockiert Zugriff`);
-      }
-      return null;
-    }
+    if (!res.ok) return null;
 
     const text = await res.text();
     if (!text || text.length < 10) return null;
@@ -201,13 +175,12 @@ export class BayernAdapter implements BodenrichtwertAdapter {
 
     console.log(`BY WMS [${layer}/${infoFormat}/${srs}] response (300 chars):`, text.substring(0, 300));
 
-    if (infoFormat === 'application/json') return this.parseJson(text);
     if (infoFormat === 'text/plain') return this.parseTextPlain(text);
-    if (infoFormat === 'text/xml') return this.parseXml(text);
+    if (infoFormat === 'application/vnd.ogc.gml') return this.parseXml(text);
     return this.parseHtml(text);
   }
 
-  // ─── WGS84 → UTM Zone 32N (vereinfachte Konvertierung) ────────────────────
+  // ─── WGS84 → UTM Zone 32N ────────────────────────────────────────────────
 
   private wgs84ToUtm32(lat: number, lon: number): [number, number] {
     const a = 6378137.0;
@@ -253,37 +226,8 @@ export class BayernAdapter implements BodenrichtwertAdapter {
 
   // ─── Parser ────────────────────────────────────────────────────────────────
 
-  private parseJson(text: string): NormalizedBRW | null {
-    try {
-      const json = JSON.parse(text);
-      const features = json.features;
-      if (!features?.length) return null;
-
-      const wohn = features.find(
-        (f: any) => (f.properties?.nutzungsart || f.properties?.NUTZUNGSART || '').startsWith('W')
-      ) || features[0];
-
-      const p = wohn.properties;
-      const wert = p.brw ?? p.BRW ?? p.bodenrichtwert ?? p.BODENRICHTWERT ?? p.wert ?? 0;
-      if (!wert || wert <= 0) return null;
-
-      return {
-        wert: Number(wert),
-        stichtag: this.convertDate(p.stichtag || p.STICHTAG || p.dat || '') || 'aktuell',
-        nutzungsart: p.nutzungsart || p.NUTZUNGSART || p.nutzung || 'unbekannt',
-        entwicklungszustand: p.entwicklungszustand || p.ENTWICKLUNGSZUSTAND || p.entw || 'B',
-        zone: p.zone || p.brz || p.lage || '',
-        gemeinde: p.gemeinde || p.GEMEINDE || p.ort || '',
-        bundesland: 'Bayern',
-        quelle: 'BORIS-Bayern (Bayerische Vermessungsverwaltung)',
-        lizenz: '© Bayerische Vermessungsverwaltung, www.geodaten.bayern.de',
-      };
-    } catch {
-      return null;
-    }
-  }
-
   private parseTextPlain(text: string): NormalizedBRW | null {
+    // VBORIS text/plain: "KEY = 'VALUE'" oder "KEY: VALUE"
     const get = (key: string): string => {
       const patterns = [
         new RegExp(`^\\s*${key}\\s*=\\s*'?([^'\\n]*)'?`, 'im'),
@@ -296,21 +240,28 @@ export class BayernAdapter implements BodenrichtwertAdapter {
       return '';
     };
 
-    const brwRaw = get('BODENRICHTWERT') || get('BRW') || get('bodenrichtwert')
-      || get('RICHTWERT') || get('richtwert') || get('brw');
-    if (!brwRaw) return null;
+    const brwRaw = get('Bodenrichtwert') || get('BODENRICHTWERT') || get('BRW')
+      || get('bodenrichtwert') || get('RICHTWERT') || get('brw');
+
+    // "Information gebührenpflichtig" → kein numerischer Wert
+    if (!brwRaw || brwRaw.includes('gebührenpflichtig')) {
+      if (brwRaw.includes('gebührenpflichtig')) {
+        console.log('BY VBORIS text/plain: BRW gebührenpflichtig');
+      }
+      return null;
+    }
 
     const wert = parseFloat(brwRaw.replace(/\./g, '').replace(',', '.'));
     if (!wert || wert <= 0 || !isFinite(wert)) return null;
 
-    const stichtagRaw = get('STICHTAG') || get('stichtag') || get('DAT') || get('DATUM');
+    const stichtagRaw = get('Stichtag') || get('STICHTAG') || get('stichtag');
     return {
       wert,
       stichtag: this.convertDate(stichtagRaw) || stichtagRaw || 'aktuell',
-      nutzungsart: get('NUTZUNGSART') || get('nutzungsart') || get('NUTZUNG') || get('ART') || 'unbekannt',
-      entwicklungszustand: get('ENTWICKLUNGSZUSTAND') || get('ENTW') || 'B',
-      zone: get('BRWNUMMER') || get('ZONE') || get('BRZ') || '',
-      gemeinde: get('GEMEINDE') || get('gemeinde') || get('GEM') || get('ORT') || '',
+      nutzungsart: get('Nutzungsart') || get('NUTZUNGSART') || 'unbekannt',
+      entwicklungszustand: get('Entwicklungszustand') || get('ENTWICKLUNGSZUSTAND') || 'B',
+      zone: get('Bodenrichtwertzonenname') || get('Bodenrichtwertnummer') || '',
+      gemeinde: get('Gemeinde') || get('GEMEINDE') || '',
       bundesland: 'Bayern',
       quelle: 'BORIS-Bayern (Bayerische Vermessungsverwaltung)',
       lizenz: '© Bayerische Vermessungsverwaltung, www.geodaten.bayern.de',
@@ -329,7 +280,7 @@ export class BayernAdapter implements BodenrichtwertAdapter {
       stichtag: this.convertDate(stichtagRaw) || stichtagRaw || 'aktuell',
       nutzungsart: this.extractField(xml, ['nutzungsart', 'NUTZUNGSART', 'nutzung', 'art']) || 'unbekannt',
       entwicklungszustand: this.extractField(xml, ['entwicklungszustand', 'ENTWICKLUNGSZUSTAND', 'entw']) || 'B',
-      zone: this.extractField(xml, ['brwnummer', 'zone', 'brz', 'lage']) || '',
+      zone: this.extractField(xml, ['bodenrichtwertzonenname', 'brwnummer', 'zone', 'brz', 'lage']) || '',
       gemeinde: this.extractField(xml, ['gemeinde', 'GEMEINDE', 'gem', 'ort']) || '',
       bundesland: 'Bayern',
       quelle: 'BORIS-Bayern (Bayerische Vermessungsverwaltung)',
@@ -338,6 +289,66 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   }
 
   private parseHtml(html: string): NormalizedBRW | null {
+    // VBORIS-spezifisch: strukturierte <td>Key</td><td>Value</td> Tabelle
+    const result = this.parseVborisTable(html);
+    if (result) return result;
+
+    // Generischer Fallback: Freitext-Suche nach EUR/m²-Mustern
+    return this.parseHtmlGeneric(html);
+  }
+
+  /**
+   * Parser für die VBORIS-HTML-Tabelle (bestätigtes Format via curl).
+   * Extrahiert Key-Value-Paare aus <td>Key</td><td>Value</td> Zeilen.
+   */
+  private parseVborisTable(html: string): NormalizedBRW | null {
+    // Alle <tr> mit genau 2 <td> Zellen extrahieren
+    const rows = [...html.matchAll(/<tr[^>]*>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<\/tr>/gi)];
+    if (rows.length === 0) return null;
+
+    const data: Record<string, string> = {};
+    for (const row of rows) {
+      const key = row[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      const val = row[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      if (key && val) data[key] = val;
+    }
+
+    // Mindestens Gemeinde oder Zonenname muss vorhanden sein
+    if (!data['Gemeinde'] && !data['Bodenrichtwertzonenname']) return null;
+
+    // BRW-Wert extrahieren
+    const brwKey = Object.keys(data).find(k => k.includes('Bodenrichtwert') && k.includes('Euro'));
+    const brwRaw = brwKey ? data[brwKey] : '';
+
+    // "Information gebührenpflichtig" → Paywall
+    if (brwRaw.includes('gebührenpflichtig') || !brwRaw) {
+      console.log('BY VBORIS: Zone erkannt, aber BRW gebührenpflichtig:',
+        data['Bodenrichtwertzonenname'] || data['Gemeinde'] || 'unbekannt');
+      return null;
+    }
+
+    const wert = parseFloat(brwRaw.replace(/\./g, '').replace(',', '.'));
+    if (!wert || wert <= 0 || !isFinite(wert)) return null;
+
+    const stichtagRaw = data['Stichtag'] || '';
+    const nutzungsart = data['Nutzungsart'] || '';
+    const entwicklung = data['Entwicklungszustand'] || '';
+
+    return {
+      wert,
+      stichtag: this.convertDate(stichtagRaw) || stichtagRaw || 'aktuell',
+      nutzungsart: nutzungsart.includes('gebührenpflichtig') ? 'unbekannt' : (nutzungsart || 'unbekannt'),
+      entwicklungszustand: entwicklung.includes('gebührenpflichtig') ? 'B' : (entwicklung || 'B'),
+      zone: data['Bodenrichtwertzonenname'] || data['Bodenrichtwertnummer'] || '',
+      gemeinde: data['Gemeinde'] || '',
+      bundesland: 'Bayern',
+      quelle: 'BORIS-Bayern (Bayerische Vermessungsverwaltung)',
+      lizenz: '© Bayerische Vermessungsverwaltung, www.geodaten.bayern.de',
+    };
+  }
+
+  /** Generischer HTML-Parser als Fallback */
+  private parseHtmlGeneric(html: string): NormalizedBRW | null {
     const plain = html
       .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
       .replace(/<[^>]+>/g, ' ')
@@ -385,12 +396,6 @@ export class BayernAdapter implements BodenrichtwertAdapter {
         const val = parseFloat(s);
         if (val > 0 && val <= 500_000 && isFinite(val)) return val;
       }
-      const attrRe = new RegExp(`\\b${field}=["']([\\d.,]+)["']`, 'i');
-      const am = xml.match(attrRe);
-      if (am) {
-        const val = parseFloat(am[1].replace(',', '.'));
-        if (val > 0 && val <= 500_000 && isFinite(val)) return val;
-      }
     }
     return null;
   }
@@ -400,9 +405,6 @@ export class BayernAdapter implements BodenrichtwertAdapter {
       const re = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
       const m = xml.match(re);
       if (m) return m[1].trim();
-      const attrRe = new RegExp(`\\b${field}=["']([^"']+)["']`, 'i');
-      const am = xml.match(attrRe);
-      if (am) return am[1].trim();
     }
     return null;
   }
@@ -423,7 +425,6 @@ export class BayernAdapter implements BodenrichtwertAdapter {
         REQUEST: 'GetCapabilities',
       });
       const res = await fetch(`${this.wmsUrls[0]}?${params}`, {
-        headers: this.getHeaders(),
         signal: AbortSignal.timeout(5000),
       });
       return res.ok;
