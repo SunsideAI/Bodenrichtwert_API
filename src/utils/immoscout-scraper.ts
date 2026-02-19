@@ -8,7 +8,7 @@
  * Quelle: atlas.immobilienscout24.de/orte/deutschland/{bundesland}/{stadt}
  */
 
-const ATLAS_BASE = 'https://atlas.immobilienscout24.de';
+export const ATLAS_BASE = 'https://atlas.immobilienscout24.de';
 
 // ─── Rotierende User-Agents (aus Python-Scraper) ──────────────────────────
 
@@ -55,25 +55,20 @@ export interface ImmoScoutPrices {
 
 // ─── URL-Slugifizierung ────────────────────────────────────────────────────
 
-const UMLAUT_MAP: Record<string, string> = {
-  'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss',
-  'Ä': 'ae', 'Ö': 'oe', 'Ü': 'ue',
-};
-
 /**
  * Konvertiert einen deutschen Ortsnamen in einen ImmoScout-URL-Slug.
- * "München" → "muenchen", "Baden-Württemberg" → "baden-wuerttemberg"
+ * ImmoScout nutzt echte Unicode-Zeichen (ü, ö, ä, ß) in URLs:
+ *   "München" → "münchen"  (NICHT "muenchen"!)
+ *   "Baden-Württemberg" → "baden-württemberg"
+ * fetch() URL-encodiert automatisch: "münchen" → "m%C3%BCnchen"
  */
 export function slugify(name: string): string {
-  let slug = name.toLowerCase();
-  for (const [char, replacement] of Object.entries(UMLAUT_MAP)) {
-    slug = slug.replaceAll(char.toLowerCase(), replacement);
-  }
-  return slug
-    .replace(/\s+/g, '-')       // Leerzeichen → Bindestriche
-    .replace(/[^a-z0-9-]/g, '') // Sonderzeichen entfernen
-    .replace(/-+/g, '-')        // Doppelte Bindestriche
-    .replace(/^-|-$/g, '');     // Führende/nachfolgende Bindestriche
+  return name
+    .toLowerCase()
+    .replace(/\s+/g, '-')              // Leerzeichen → Bindestriche
+    .replace(/[^a-zäöüß0-9-]/g, '')   // Sonderzeichen entfernen, Umlaute behalten
+    .replace(/-+/g, '-')              // Doppelte Bindestriche
+    .replace(/^-|-$/g, '');           // Führende/nachfolgende Bindestriche
 }
 
 // ─── _atlas_initialState Extraktion ────────────────────────────────────────
