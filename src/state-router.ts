@@ -40,7 +40,9 @@ const adapterRegistry: Record<string, BodenrichtwertAdapter> = {
   // Tier 1b: WFS-Adapter (freie Daten, gleiche NI-Infrastruktur)
   'Bremen': new BremenAdapter(),
 
-  // Tier 2b: WMS-Adapter (GetFeatureInfo + WFS, eingeschränktere Lizenzen)
+  // Tier 2b: WMS-Adapter (GetFeatureInfo, eingeschränktere Lizenzen)
+  // Bayern: VBORIS-WMS funktioniert technisch, aber die meisten BRW-Werte
+  // sind gebührenpflichtig. Gibt null zurück wenn paywalled.
   'Bayern': new BayernAdapter(),
   'Saarland': new SaarlandAdapter(),
 
