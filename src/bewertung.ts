@@ -641,7 +641,8 @@ export function buildBewertung(
   let konfidenz: 'hoch' | 'mittel' | 'gering';
   let spread: number;
 
-  if (wohnflaecheGeschaetzt || (!marktPreisProQm && !hasBRW)) {
+  // Bundesdurchschnitt-Fallback (kein lokaler Marktpreis) → immer "gering", egal ob BRW vorhanden
+  if (wohnflaecheGeschaetzt || (!marktPreisProQm && !hasBRW) || (bewertungsmethode === 'marktpreis-indikation' && !marktPreisProQm)) {
     konfidenz = 'gering';
     spread = 0.25;
   } else if (grundflaecheGeschaetzt) {
