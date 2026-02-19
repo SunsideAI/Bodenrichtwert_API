@@ -1,5 +1,5 @@
 import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
-import { scrapeImmoScoutAtlas, slugify } from '../utils/immoscout-scraper.js';
+import { scrapeImmoScoutAtlas, slugify, ATLAS_BASE } from '../utils/immoscout-scraper.js';
 
 const NOMINATIM_URL = process.env.NOMINATIM_URL || 'https://nominatim.openstreetmap.org';
 
@@ -163,5 +163,3 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
     }
   }
 }
-
-const ATLAS_BASE = 'https://atlas.immobilienscout24.de';
