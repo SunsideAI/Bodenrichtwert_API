@@ -43,12 +43,15 @@ export async function geocode(strasse, plz, ort) {
                     || result.address?.city_district
                     || result.address?.quarter
                     || '';
+                // Landkreis (leer bei kreisfreien Städten wie München, Hamburg)
+                const county = result.address?.county || '';
                 return {
                     lat,
                     lon,
                     state: normalizeStateName(state),
                     city,
                     district,
+                    county,
                     displayName: result.display_name || query,
                 };
             }

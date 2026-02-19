@@ -6,6 +6,7 @@ export interface GeoResult {
   state: string;
   city: string;           // Stadt/Gemeinde (z.B. "München", "Stuttgart")
   district: string;       // Stadtteil/Bezirk (z.B. "Schwabing", "Altona")
+  county: string;         // Landkreis (z.B. "Landkreis Gifhorn", bei kreisfreien Städten leer)
   displayName: string;
 }
 
@@ -66,12 +67,16 @@ export async function geocode(
           || result.address?.quarter
           || '';
 
+        // Landkreis (leer bei kreisfreien Städten wie München, Hamburg)
+        const county = result.address?.county || '';
+
         return {
           lat,
           lon,
           state: normalizeStateName(state),
           city,
           district,
+          county,
           displayName: result.display_name || query,
         };
       }

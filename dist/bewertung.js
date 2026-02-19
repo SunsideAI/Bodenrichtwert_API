@@ -542,7 +542,8 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
     // Geschätzte Inputs → immer "gering" mit breiter Spanne
     let konfidenz;
     let spread;
-    if (wohnflaecheGeschaetzt || (!marktPreisProQm && !hasBRW)) {
+    // Bundesdurchschnitt-Fallback (kein lokaler Marktpreis) → immer "gering", egal ob BRW vorhanden
+    if (wohnflaecheGeschaetzt || (!marktPreisProQm && !hasBRW) || (bewertungsmethode === 'marktpreis-indikation' && !marktPreisProQm)) {
         konfidenz = 'gering';
         spread = 0.25;
     }

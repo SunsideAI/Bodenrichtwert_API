@@ -36,12 +36,22 @@ if (token) {
 // ==========================================
 
 /**
+ * Extrahiert den eigentlichen Kreisnamen aus einem Nominatim-county-String.
+ * "Landkreis Gifhorn" → "Gifhorn", "Kreis Soest" → "Soest", "München" → ""
+ */
+function extractKreisname(county: string): string {
+  return county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.)\s+/i, '').trim();
+}
+
+/**
  * Holt ImmoScout-Marktdaten für eine Stadt (mit Cache).
+ * Fallback-Kette: Stadt-Atlas → Landkreis-Atlas → null
  * Gibt null zurück bei Fehlern – blockiert nie die Haupt-Response.
  */
 async function fetchMarktdaten(
   state: string,
   city: string,
+  county?: string,   // Landkreis-Fallback (z.B. "Landkreis Gifhorn")
 ): Promise<ImmoScoutPrices | null> {
   if (!city) return null;
 
@@ -56,15 +66,37 @@ async function fetchMarktdaten(
     return cached;
   }
 
-  // 2. Live scrapen
+  // 2. Stadt-Level Atlas
   console.log(`ImmoScout: Marktdaten für ${city} (${state}) abrufen...`);
   const prices = await scrapeImmoScoutAtlas(bundeslandSlug, stadtSlug);
-
   if (prices) {
     immoCache.set(cacheKey, prices);
+    return prices;
   }
 
-  return prices;
+  // 3. Landkreis-Atlas als Fallback (für Kleinstädte ohne eigene Atlas-Seite)
+  if (county) {
+    const kreisname = extractKreisname(county);
+    if (kreisname && kreisname.toLowerCase() !== city.toLowerCase()) {
+      const kreisSlug = slugify(kreisname);
+      const kreisCacheKey = `${bundeslandSlug}:kreis:${kreisSlug}`;
+
+      const kreisCache = immoCache.get(kreisCacheKey);
+      if (kreisCache) {
+        console.log(`ImmoScout-Cache hit (Landkreis): ${kreisCacheKey}`);
+        return kreisCache;
+      }
+
+      console.log(`ImmoScout: Kein Stadtpreis für ${city}, versuche Landkreis "${kreisname}"...`);
+      const kreisPrices = await scrapeImmoScoutAtlas(bundeslandSlug, kreisSlug);
+      if (kreisPrices) {
+        immoCache.set(kreisCacheKey, kreisPrices);
+        return kreisPrices;
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -264,7 +296,7 @@ app.post('/api/enrich', async (c) => {
     }
 
     // 2. Alle externen Datenquellen parallel starten (blockiert nie)
-    const marktdatenPromise = fetchMarktdaten(geo.state, geo.city)
+    const marktdatenPromise = fetchMarktdaten(geo.state, geo.city, geo.county)
       .then((cityPrices) => fetchDistrictMarktdaten(geo.state, geo.city, geo.district, cityPrices))
       .catch((err) => {
         console.warn('ImmoScout Marktdaten Fehler:', err);

@@ -4,6 +4,7 @@ export interface GeoResult {
     state: string;
     city: string;
     district: string;
+    county: string;
     displayName: string;
 }
 /**
