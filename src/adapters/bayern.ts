@@ -4,10 +4,13 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  * Bayern Adapter
  *
  * Nutzt den offiziellen Bayern-Geoportal WMS GetFeatureInfo Endpunkt.
- * URL: https://geoservices.bayern.de/wms/v1/ogc_bodenrichtwerte.cgi
- * WMS-Version: 1.1.1 (!) – 1.3.0 liefert leere GetCapabilities.
+ * Mehrere WMS-URLs werden probiert, da geoservices.bayern.de teilweise
+ * Anfragen ohne Browser-Headers blockiert (403 / leere GetCapabilities).
  *
- * Layer: bodenrichtwerte_aktuell (bestätigt via Geoportal Bayern)
+ * Lösung: Browser-ähnliche Headers (User-Agent + Referer + Origin)
+ * wie beim SH-Adapter (schleswig-holstein.ts:36-45).
+ *
+ * Layer: bodenrichtwerte_aktuell (bestätigt via Geoportal Bayern Capabilities Viewer)
  * CRS: EPSG:25832 nativ, EPSG:4326 wird unterstützt
  * BBOX (WMS 1.1.1, EPSG:4326): minlon,minlat,maxlon,maxlat
  *
@@ -18,7 +21,12 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   stateCode = 'BY';
   isFallback = false;
 
-  private readonly wmsUrl = 'https://geoservices.bayern.de/wms/v1/ogc_bodenrichtwerte.cgi';
+  // Mehrere WMS-URLs (Fallback-Kette)
+  private readonly wmsUrls = [
+    'https://geoservices.bayern.de/wms/v1/ogc_bodenrichtwerte.cgi',
+    'https://geoservices.bayern.de/wms/v2/ogc_bodenrichtwerte.cgi',
+    'https://www.geodaten.bayern.de/ogc/ogc_bodenrichtwerte.cgi',
+  ];
 
   // Bekannte Layer (bestätigt via Geoportal-Viewer)
   private layerCandidates = [
@@ -27,24 +35,47 @@ export class BayernAdapter implements BodenrichtwertAdapter {
     '0',
   ];
 
-  private discoveredLayers: string[] | null = null;
+  // Browser-ähnliche Headers (wie SH-Pattern, um 403-Blockaden zu umgehen)
+  private getHeaders(): Record<string, string> {
+    return {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://geoportal.bayern.de/',
+      'Origin': 'https://geoportal.bayern.de',
+    };
+  }
+
+  private discoveredLayers: Record<string, string[]> = {};
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    if (!this.discoveredLayers) {
-      this.discoveredLayers = await this.discoverLayers();
-      console.log('BY WMS: Discovered layers:', this.discoveredLayers);
+    for (const wmsUrl of this.wmsUrls) {
+      try {
+        const result = await this.queryEndpoint(lat, lon, wmsUrl);
+        if (result) return result;
+      } catch (err) {
+        console.warn(`BY WMS ${wmsUrl} error:`, err);
+      }
     }
 
-    const layersToTry = this.discoveredLayers.length > 0
-      ? this.discoveredLayers
+    console.error('BY adapter: Kein Treffer mit allen WMS-URLs/Layer/Format/CRS-Kombinationen');
+    return null;
+  }
+
+  private async queryEndpoint(lat: number, lon: number, wmsUrl: string): Promise<NormalizedBRW | null> {
+    // Layer-Discovery (einmal pro URL)
+    if (!this.discoveredLayers[wmsUrl]) {
+      this.discoveredLayers[wmsUrl] = await this.discoverLayers(wmsUrl);
+      console.log(`BY WMS ${wmsUrl}: Discovered layers:`, this.discoveredLayers[wmsUrl]);
+    }
+
+    const layersToTry = this.discoveredLayers[wmsUrl].length > 0
+      ? this.discoveredLayers[wmsUrl]
       : this.layerCandidates;
 
-    // Zwei CRS-Strategien: erst EPSG:4326, dann EPSG:25832 mit UTM-Konvertierung
     for (const layer of layersToTry) {
       // Strategie 1: EPSG:4326 (direkt mit lat/lon)
       for (const fmt of ['text/xml', 'text/plain', 'text/html', 'application/json'] as const) {
         try {
-          const result = await this.queryWms(lat, lon, layer, fmt, 'EPSG:4326');
+          const result = await this.queryWms(lat, lon, wmsUrl, layer, fmt, 'EPSG:4326');
           if (result) return result;
         } catch { /* nächste Kombination */ }
       }
@@ -52,18 +83,16 @@ export class BayernAdapter implements BodenrichtwertAdapter {
       // Strategie 2: EPSG:25832 (UTM-Konvertierung)
       for (const fmt of ['text/xml', 'text/plain', 'text/html'] as const) {
         try {
-          const result = await this.queryWms(lat, lon, layer, fmt, 'EPSG:25832');
+          const result = await this.queryWms(lat, lon, wmsUrl, layer, fmt, 'EPSG:25832');
           if (result) return result;
         } catch { /* nächste Kombination */ }
       }
     }
 
-    console.error('BY adapter: Kein Treffer mit allen Layer/Format/CRS-Kombinationen');
     return null;
   }
 
-  private async discoverLayers(): Promise<string[]> {
-    // Versuche beide WMS-Versionen für GetCapabilities
+  private async discoverLayers(wmsUrl: string): Promise<string[]> {
     for (const version of ['1.1.1', '1.3.0']) {
       try {
         const params = new URLSearchParams({
@@ -72,14 +101,21 @@ export class BayernAdapter implements BodenrichtwertAdapter {
           REQUEST: 'GetCapabilities',
         });
 
-        const res = await fetch(`${this.wmsUrl}?${params}`, {
-          headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+        const res = await fetch(`${wmsUrl}?${params}`, {
+          headers: this.getHeaders(),
           signal: AbortSignal.timeout(10000),
         });
 
-        if (!res.ok) continue;
+        if (!res.ok) {
+          console.warn(`BY GetCapabilities ${wmsUrl} (v${version}): HTTP ${res.status}`);
+          continue;
+        }
 
         const xml = await res.text();
+
+        // Debug: Erste 500 Zeichen loggen um die Antwort zu verstehen
+        console.log(`BY GetCapabilities ${wmsUrl} (v${version}) (500 chars):`, xml.substring(0, 500));
+
         const layers: string[] = [];
 
         // Queryable Layer bevorzugen
@@ -89,7 +125,6 @@ export class BayernAdapter implements BodenrichtwertAdapter {
           layers.push(match[1].trim());
         }
 
-        // Falls kein queryable-Attribut, alle Layer-Namen
         if (layers.length === 0) {
           const nameRegex = /<Layer[^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
           while ((match = nameRegex.exec(xml)) !== null) {
@@ -114,15 +149,15 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   private async queryWms(
     lat: number,
     lon: number,
+    wmsUrl: string,
     layer: string,
     infoFormat: string,
     srs: string,
   ): Promise<NormalizedBRW | null> {
     let bbox: string;
     if (srs === 'EPSG:25832') {
-      // WGS84 → UTM Zone 32N Konvertierung
       const [e, n] = this.wgs84ToUtm32(lat, lon);
-      const delta = 50; // 50m Radius in UTM
+      const delta = 50;
       bbox = `${e - delta},${n - delta},${e + delta},${n + delta}`;
     } else {
       // WMS 1.1.1 + EPSG:4326: BBOX = minlon,minlat,maxlon,maxlat
@@ -148,12 +183,17 @@ export class BayernAdapter implements BodenrichtwertAdapter {
       FORMAT: 'image/png',
     });
 
-    const res = await fetch(`${this.wmsUrl}?${params}`, {
-      headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+    const res = await fetch(`${wmsUrl}?${params}`, {
+      headers: this.getHeaders(),
       signal: AbortSignal.timeout(15000),
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 403) {
+        console.warn(`BY WMS [${layer}/${srs}] 403 Forbidden — Server blockiert Zugriff`);
+      }
+      return null;
+    }
 
     const text = await res.text();
     if (!text || text.length < 10) return null;
@@ -176,7 +216,7 @@ export class BayernAdapter implements BodenrichtwertAdapter {
     const e = Math.sqrt(2 * f - f * f);
     const e2 = e * e;
     const ep2 = e2 / (1 - e2);
-    const lon0 = 9; // UTM Zone 32 Zentralmeridian
+    const lon0 = 9;
 
     const latRad = (lat * Math.PI) / 180;
     const lonRad = ((lon - lon0) * Math.PI) / 180;
@@ -244,7 +284,6 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   }
 
   private parseTextPlain(text: string): NormalizedBRW | null {
-    // Format: "KEY = 'VALUE'" oder "KEY = VALUE" oder "KEY: VALUE"
     const get = (key: string): string => {
       const patterns = [
         new RegExp(`^\\s*${key}\\s*=\\s*'?([^'\\n]*)'?`, 'im'),
@@ -383,7 +422,8 @@ export class BayernAdapter implements BodenrichtwertAdapter {
         VERSION: '1.1.1',
         REQUEST: 'GetCapabilities',
       });
-      const res = await fetch(`${this.wmsUrl}?${params}`, {
+      const res = await fetch(`${this.wmsUrls[0]}?${params}`, {
+        headers: this.getHeaders(),
         signal: AbortSignal.timeout(5000),
       });
       return res.ok;
