@@ -5,6 +5,7 @@ export interface GeoResult {
   lon: number;
   state: string;
   city: string;           // Stadt/Gemeinde (z.B. "München", "Stuttgart")
+  district: string;       // Stadtteil/Bezirk (z.B. "Schwabing", "Altona")
   displayName: string;
 }
 
@@ -59,11 +60,18 @@ export async function geocode(
           || ort
           || '';
 
+        // Stadtteil: suburb > city_district > quarter
+        const district = result.address?.suburb
+          || result.address?.city_district
+          || result.address?.quarter
+          || '';
+
         return {
           lat,
           lon,
           state: normalizeStateName(state),
           city,
+          district,
           displayName: result.display_name || query,
         };
       }

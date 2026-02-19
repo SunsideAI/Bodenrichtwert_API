@@ -11,6 +11,10 @@
 
 import type { NormalizedBRW } from './adapters/base.js';
 import type { ImmoScoutPrices } from './utils/immoscout-scraper.js';
+import type { PreisindexEntry } from './utils/bundesbank.js';
+import { calcIndexKorrektur } from './utils/bundesbank.js';
+import { calcGebaeudewertNHK } from './utils/nhk.js';
+import type { NRWImmobilienrichtwert } from './utils/nrw-irw.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -171,9 +175,19 @@ function calcNeubauFaktor(baujahr: number | null): number {
   return 0;
 }
 
-function calcStichtagKorrektur(brw: NormalizedBRW | null): number {
+function calcStichtagKorrektur(
+  brw: NormalizedBRW | null,
+  preisindex?: PreisindexEntry[] | null,
+): number {
   if (!brw?.stichtag) return 0;
 
+  // Versuch 1: Echter Bundesbank-Preisindex
+  if (preisindex && preisindex.length > 0) {
+    const indexKorrektur = calcIndexKorrektur(brw.stichtag, preisindex);
+    if (indexKorrektur !== null) return indexKorrektur;
+  }
+
+  // Fallback: Pauschale +2.5%/Jahr nach 2-Jahres-Frist
   const stichtag = new Date(brw.stichtag);
   if (isNaN(stichtag.getTime())) return 0;
 
@@ -215,9 +229,36 @@ export function buildBewertung(
   input: BewertungInput,
   brw: NormalizedBRW | null,
   marktdaten: ImmoScoutPrices | null,
+  preisindex?: PreisindexEntry[] | null,
+  irw?: NRWImmobilienrichtwert | null,
 ): Bewertung | null {
   // Gate: Wohnfläche ist Pflicht
   if (!input.wohnflaeche || input.wohnflaeche <= 0) return null;
+
+  // ─── Input-Plausibilitätsprüfung ────────────────────────────────────────────
+  const validationHinweise: string[] = [];
+  const currentYear = new Date().getFullYear();
+
+  if (input.baujahr != null && (input.baujahr < 1800 || input.baujahr > currentYear + 5)) {
+    validationHinweise.push(
+      `Baujahr ${input.baujahr} liegt außerhalb des plausiblen Bereichs (1800–${currentYear + 5}). Ergebnis möglicherweise unzuverlässig.`,
+    );
+  }
+  if (input.wohnflaeche < 15) {
+    validationHinweise.push(
+      `Wohnfläche ${input.wohnflaeche} m² ist ungewöhnlich klein. Ergebnis möglicherweise unzuverlässig.`,
+    );
+  }
+  if (input.wohnflaeche > 2000) {
+    validationHinweise.push(
+      `Wohnfläche ${input.wohnflaeche} m² ist ungewöhnlich groß. Ergebnis möglicherweise unzuverlässig.`,
+    );
+  }
+  if (input.grundstuecksflaeche != null && input.grundstuecksflaeche > 50000) {
+    validationHinweise.push(
+      `Grundstücksfläche ${input.grundstuecksflaeche} m² ist ungewöhnlich groß. Ergebnis möglicherweise unzuverlässig.`,
+    );
+  }
 
   const istHaus = !input.art?.toLowerCase().includes('wohnung');
   const marktPreisProQm = selectMarktpreis(marktdaten, istHaus);
@@ -234,7 +275,7 @@ export function buildBewertung(
     objektunterart: calcObjektunterartFaktor(input.objektunterart),
     grundstueck: 0, // In Sachwert-lite über BRW abgedeckt
     neubau: calcNeubauFaktor(input.baujahr),
-    stichtag_korrektur: calcStichtagKorrektur(brw),
+    stichtag_korrektur: calcStichtagKorrektur(brw, preisindex),
     gesamt: 0, // wird unten berechnet
   };
 
@@ -258,7 +299,7 @@ export function buildBewertung(
   let bodenwert = 0;
   let gebaeudewert = 0;
   let realistischerImmobilienwert = 0;
-  const hinweise: string[] = [];
+  const hinweise: string[] = [...validationHinweise];
   const datenquellen: string[] = [];
 
   // Überlapp-Korrektur: Neubau schließt positiven Modernisierungs-Bonus ein
@@ -292,18 +333,31 @@ export function buildBewertung(
       }
       datenquellen.push('BORIS/WFS Bodenrichtwert', 'ImmoScout24 Atlas Marktpreise');
     } else {
-      // Kein Marktpreis: Gebäudewert aus BRW-Verhältnis schätzen (60:40)
-      gebaeudewert = Math.round(bodenwert * 1.5 * (1 + faktoren.gesamt));
-      datenquellen.push('BORIS/WFS Bodenrichtwert');
-      hinweise.push('Gebäudewert ohne Marktdaten geschätzt (Verhältnis 60:40).');
+      // Kein Marktpreis: Gebäudewert über NHK 2010 berechnen (ImmoWertV Anlage 4)
+      const istHaus = !input.art?.toLowerCase().includes('wohnung');
+      const nhk = calcGebaeudewertNHK(
+        input.wohnflaeche, input.baujahr,
+        input.objektunterart, input.ausstattung, input.modernisierung,
+        istHaus,
+      );
+      gebaeudewert = nhk.gebaeudewert;
+      datenquellen.push('BORIS/WFS Bodenrichtwert', 'NHK 2010 (ImmoWertV 2022)');
+      hinweise.push(...nhk.hinweise);
     }
 
     realistischerImmobilienwert = bodenwert + gebaeudewert;
 
-    if (faktoren.stichtag_korrektur > 0) {
+    if (faktoren.stichtag_korrektur !== 0) {
+      const vorzeichen = faktoren.stichtag_korrektur > 0 ? '+' : '';
+      const quelle = preisindex && preisindex.length > 0
+        ? 'Bundesbank Wohnimmobilienpreisindex'
+        : 'pauschale Schätzung (+2,5%/Jahr)';
       hinweise.push(
-        `BRW-Stichtag ${brw!.stichtag} liegt >2 Jahre zurück. Marktanpassung +${(faktoren.stichtag_korrektur * 100).toFixed(1)}% angewandt.`,
+        `BRW-Stichtag ${brw!.stichtag}: Marktanpassung ${vorzeichen}${(faktoren.stichtag_korrektur * 100).toFixed(1)}% (${quelle}).`,
       );
+      if (preisindex && preisindex.length > 0) {
+        datenquellen.push('Bundesbank Wohnimmobilienpreisindex');
+      }
     }
   } else {
     // ─── Marktpreis-Indikation: nur ImmoScout-Daten ───
@@ -352,16 +406,38 @@ export function buildBewertung(
     }
   }
 
+  // IRW Cross-Validation (nur NRW)
+  if (irw && input.wohnflaeche > 0) {
+    const irwGesamt = irw.irw * input.wohnflaeche;
+    const abweichung = Math.abs(realistischerImmobilienwert - irwGesamt) / irwGesamt;
+    datenquellen.push('BORIS-NRW Immobilienrichtwerte');
+    if (abweichung > 0.25) {
+      hinweise.push(
+        `Abweichung zum NRW Immobilienrichtwert: ${Math.round(abweichung * 100)}% (IRW: ${irw.irw} €/m², Normobjekt ${irw.teilmarkt}). Manuelle Prüfung empfohlen.`,
+      );
+    } else {
+      hinweise.push(
+        `NRW Immobilienrichtwert bestätigt Bewertung (IRW: ${irw.irw} €/m², Abweichung ${Math.round(abweichung * 100)}%, Normobjekt ${irw.teilmarkt}).`,
+      );
+    }
+  }
+
   // BRW Schätzwert Hinweis
   if (brw?.schaetzung) {
     datenquellen.push('ImmoScout24 Atlas (BRW-Schätzwert)');
     hinweise.push('Bodenrichtwert ist ein Schätzwert (kein offizieller BRW). Genauigkeit eingeschränkt.');
   }
 
-  // Allgemeiner Hinweis
-  hinweise.push(
-    'Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas). Lage-spezifische Abweichungen möglich.',
-  );
+  // Allgemeiner Hinweis zur Marktdaten-Granularität
+  if (marktdaten?.stadtteil) {
+    hinweise.push(
+      `Marktpreise basieren auf Stadtteil-Daten für ${marktdaten.stadtteil} (ImmoScout24 Atlas).`,
+    );
+  } else {
+    hinweise.push(
+      'Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas). Lage-spezifische Abweichungen möglich.',
+    );
+  }
 
   return {
     realistischer_qm_preis: realistischerQmPreis,

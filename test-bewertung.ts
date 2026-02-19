@@ -146,7 +146,7 @@ function runUnitTests() {
     const result = buildBewertung(mockInput({ wohnflaeche: 150 }), null, mockMarktdaten({ haus_kauf_preis: 4000 }));
     assert(result !== null, 'Result ist nicht null');
     assert(result!.bewertungsmethode === 'marktpreis-indikation', 'Methode = marktpreis-indikation');
-    assert(result!.konfidenz === 'gering', 'Konfidenz = gering');
+    assert(result!.konfidenz === 'mittel', 'Konfidenz = mittel (marktpreis-indikation)');
     assert(result!.hinweise.some(h => h.includes('Kein Bodenrichtwert')), 'Hinweis zu fehlendem BRW');
     console.log(`    → Methode: ${result!.bewertungsmethode}, Wert: ${result!.realistischer_immobilienwert}€\n`);
   }
@@ -221,7 +221,7 @@ function runUnitTests() {
     const result = buildBewertung(input, mockBRW(), mockMarktdaten());
     assert(result !== null, 'Result ist nicht null');
     assertApprox(result!.faktoren.neubau, 0.10, 0.001, 'Neubau = +0.10');
-    assertApprox(result!.faktoren.baujahr, 0.03, 0.001, 'Baujahr = +0.03 (>2010)');
+    assertApprox(result!.faktoren.baujahr, 0, 0.001, 'Baujahr = 0 (>=2020 → Neubau übernimmt)');
     console.log(`    → Neubau: ${result!.faktoren.neubau}, Baujahr: ${result!.faktoren.baujahr}\n`);
   }
 
@@ -239,14 +239,16 @@ function runUnitTests() {
     console.log(`    → Wert: ${result!.realistischer_immobilienwert}€ (Basis: wohnung_kauf 4500€/m²)\n`);
   }
 
-  // 11. Sachwert-lite ohne Marktdaten (nur BRW)
+  // 11. Sachwert-lite ohne Marktdaten (nur BRW) → NHK 2010 Gebäudewert
   {
-    console.log('Test 11: Sachwert-lite ohne Marktdaten (nur BRW, 60:40 Schätzung)');
+    console.log('Test 11: Sachwert-lite ohne Marktdaten (nur BRW, NHK 2010)');
     const result = buildBewertung(mockInput(), mockBRW(), null);
     assert(result !== null, 'Result ist nicht null');
     assert(result!.bewertungsmethode === 'sachwert-lite', 'Methode = sachwert-lite');
-    assert(result!.hinweise.some(h => h.includes('60:40')), 'Hinweis zu 60:40 Schätzung');
-    console.log(`    → Bodenwert: ${result!.bodenwert}€, Gebäude (geschätzt): ${result!.gebaeudewert}€\n`);
+    assert(result!.datenquellen.includes('NHK 2010 (ImmoWertV 2022)'), 'Datenquelle NHK 2010');
+    assert(result!.hinweise.some(h => h.includes('NHK-Berechnung')), 'Hinweis zu NHK-Berechnung');
+    assert(result!.gebaeudewert > 0, `Gebäudewert > 0 (${result!.gebaeudewert})`);
+    console.log(`    → Bodenwert: ${result!.bodenwert}€, Gebäude (NHK): ${result!.gebaeudewert}€\n`);
   }
 
   // 12. Marktpreis-Indikation (BRW vorhanden aber keine Grundstücksfläche)
@@ -299,6 +301,103 @@ function runUnitTests() {
     assert(result!.bewertungsmethode === 'sachwert-lite', 'Methode = sachwert-lite');
     assert(result!.bodenwert > 0, `Bodenwert > 0 (${result!.bodenwert})`);
     console.log(`    → Grundstück: ${parsed}m², Bodenwert: ${result!.bodenwert}€\n`);
+  }
+
+  // 16. Input-Validierung: Extremes Baujahr
+  {
+    console.log('Test 16: Input-Validierung — Baujahr 1750 (außerhalb 1800–Zukunft)');
+    const result = buildBewertung(mockInput({ baujahr: 1750 }), mockBRW(), mockMarktdaten());
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.hinweise.some(h => h.includes('Baujahr 1750') && h.includes('plausiblen Bereichs')), 'Validierungs-Hinweis für Baujahr');
+    console.log(`    → Hinweis: ${result!.hinweise.find(h => h.includes('Baujahr'))}\n`);
+  }
+
+  // 17. Input-Validierung: Ungewöhnlich kleine Wohnfläche
+  {
+    console.log('Test 17: Input-Validierung — Wohnfläche 12m² (ungewöhnlich klein)');
+    const result = buildBewertung(
+      mockInput({ wohnflaeche: 12, grundstuecksflaeche: null }),
+      null,
+      mockMarktdaten(),
+    );
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.hinweise.some(h => h.includes('12 m²') && h.includes('ungewöhnlich klein')), 'Validierungs-Hinweis für kleine Wohnfläche');
+    console.log(`    → Hinweis: ${result!.hinweise.find(h => h.includes('ungewöhnlich'))}\n`);
+  }
+
+  // 18. Stadtteil-Hinweis bei vorhandenem Stadtteil
+  {
+    console.log('Test 18: Stadtteil-Hinweis bei Stadtteil-Daten');
+    const markt = mockMarktdaten({ stadtteil: 'Schwabing' });
+    const result = buildBewertung(mockInput({ grundstuecksflaeche: null }), null, markt);
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.hinweise.some(h => h.includes('Stadtteil-Daten') && h.includes('Schwabing')), 'Stadtteil-Hinweis vorhanden');
+    console.log(`    → Hinweis: ${result!.hinweise.find(h => h.includes('Stadtteil'))}\n`);
+  }
+
+  // 19. Kein Stadtteil → Stadtdurchschnitt-Hinweis
+  {
+    console.log('Test 19: Stadtdurchschnitt-Hinweis ohne Stadtteil');
+    const markt = mockMarktdaten({ stadtteil: '' });
+    const result = buildBewertung(mockInput({ grundstuecksflaeche: null }), null, markt);
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.hinweise.some(h => h.includes('Stadtdurchschnitt')), 'Stadtdurchschnitt-Hinweis vorhanden');
+    console.log(`    → Hinweis: ${result!.hinweise.find(h => h.includes('Stadtdurchschnitt'))}\n`);
+  }
+
+  // 20. NHK-Gebäudewert plausibel (150m² EFH, Baujahr 2000, mittel)
+  {
+    console.log('Test 20: NHK-Gebäudewert plausibel (150m² EFH, Bj.2000, mittel)');
+    const input = mockInput({ wohnflaeche: 150, baujahr: 2000, ausstattung: 'Mittel', objektunterart: 'Freistehendes Einfamilienhaus' });
+    const result = buildBewertung(input, mockBRW(), null);
+    assert(result !== null, 'Result ist nicht null');
+    // NHK 2010 Stufe 3 = 835€/m² BGF, BGF ≈ 150*1.35=203, BPI ≈ 1.86
+    // Herstellungskosten ≈ 835 * 203 * 1.86 ≈ 315.000€
+    // Alter ≈ 26J von 80J GND → RND/GND ≈ 54/80 ≈ 0.675
+    // Gebäudewert ≈ 315.000 * 0.675 ≈ 213.000€
+    assert(result!.gebaeudewert > 100000, `Gebäudewert > 100k (${result!.gebaeudewert})`);
+    assert(result!.gebaeudewert < 500000, `Gebäudewert < 500k (${result!.gebaeudewert})`);
+    console.log(`    → Gebäudewert NHK: ${result!.gebaeudewert}€\n`);
+  }
+
+  // 21. IRW Cross-Validation (NRW)
+  {
+    console.log('Test 21: IRW Cross-Validation (NRW)');
+    const irw = {
+      irw: 3000,
+      teilmarkt: 'EFH',
+      stichtag: '2025-01-01',
+      normobjekt: { baujahr: 1980, wohnflaeche: 120 },
+      gemeinde: 'Köln',
+      quelle: 'BORIS-NRW Immobilienrichtwerte' as const,
+    };
+    const result = buildBewertung(mockInput(), mockBRW(), mockMarktdaten(), null, irw);
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.datenquellen.includes('BORIS-NRW Immobilienrichtwerte'), 'Datenquelle IRW vorhanden');
+    assert(result!.hinweise.some(h => h.includes('Immobilienrichtwert')), 'IRW-Hinweis vorhanden');
+    console.log(`    → Hinweis: ${result!.hinweise.find(h => h.includes('Immobilienrichtwert'))}\n`);
+  }
+
+  // 22. Bundesbank Preisindex-Integration (Stichtag-Korrektur)
+  {
+    console.log('Test 22: Bundesbank Preisindex-basierte Stichtag-Korrektur');
+    const preisindex = [
+      { quartal: '2020-Q1', index: 100 },
+      { quartal: '2021-Q1', index: 110 },
+      { quartal: '2022-Q1', index: 120 },
+      { quartal: '2023-Q1', index: 115 },
+      { quartal: '2024-Q1', index: 118 },
+      { quartal: '2025-Q1', index: 120 },
+      { quartal: '2025-Q4', index: 122 },
+    ];
+    const brw = mockBRW({ stichtag: '2020-01-01' });
+    const result = buildBewertung(mockInput(), brw, mockMarktdaten(), preisindex);
+    assert(result !== null, 'Result ist nicht null');
+    assert(result!.faktoren.stichtag_korrektur > 0, `Stichtag-Korrektur > 0 (${result!.faktoren.stichtag_korrektur})`);
+    // Korrektur ≈ (122 / 100) - 1 = 0.22 (22%)
+    assert(result!.hinweise.some(h => h.includes('Bundesbank')), 'Bundesbank-Hinweis vorhanden');
+    console.log(`    → Stichtag-Korrektur: ${(result!.faktoren.stichtag_korrektur * 100).toFixed(1)}%`);
+    console.log(`    → Hinweis: ${result!.hinweise.find(h => h.includes('Stichtag'))}\n`);
   }
 
   // Zusammenfassung
