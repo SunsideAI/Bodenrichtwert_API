@@ -67,24 +67,37 @@ function calcModernisierungFaktor(
   baujahr: number | null,
 ): number {
   if (!modernisierung) return 0;
+
+  // Numerischer Score: 5=Kernsanierung, 4=Umfassend, 3=Teilweise, 2=Einzelne, 1=Keine
+  const score = Number(modernisierung);
+  if (!isNaN(score) && String(modernisierung).trim() !== '') {
+    const alter = baujahr ?? 2000;
+    if (score >= 5) return 0.02;
+    if (score >= 4) return 0;
+    if (score >= 3) return alter < 1970 ? -0.06 : alter < 1990 ? -0.04 : -0.02;
+    if (score >= 2) return alter < 1970 ? -0.10 : alter < 1990 ? -0.08 : -0.05;
+    return alter < 1970 ? -0.18 : alter < 1990 ? -0.12 : -0.02;
+  }
+
   const m = modernisierung.toLowerCase();
 
   if (m.includes('kernsanierung') || m.includes('neuwertig')) return 0.02;
-  if (m.includes('umfassende modernisierung')) return 0;
+  // Bug-Fix: "umfassend modernisiert" / "vollständig modernisiert" ebenfalls matchen
+  if (m.includes('umfassend') || m.includes('vollständig') || m.includes('vollsaniert')) return 0;
 
-  if (m.includes('teilweise modernisiert') || m.includes('teilsaniert')) {
+  if (m.includes('teilweise') || m.includes('teilsaniert')) {
     if (baujahr && baujahr < 1970) return -0.06;
     if (baujahr && baujahr < 1990) return -0.04;
     return -0.02;
   }
 
-  if (m.includes('nur einzelne') || m.includes('einzelne maßnahmen')) {
+  if (m.includes('nur einzelne') || m.includes('einzelne maßnahmen') || m.includes('einzelne')) {
     if (baujahr && baujahr < 1970) return -0.10;
     if (baujahr && baujahr < 1990) return -0.08;
     return -0.05;
   }
 
-  if (m.includes('keine modernisierung') || m.includes('unsaniert') || m.includes('unrenoviert')) {
+  if (m.includes('keine') || m.includes('unsaniert') || m.includes('unrenoviert')) {
     if (baujahr && baujahr < 1970) return -0.18;
     if (baujahr && baujahr < 1990) return -0.12;
     return -0.02;
@@ -95,21 +108,43 @@ function calcModernisierungFaktor(
 
 function calcEnergieFaktor(energie: string | null): number {
   if (!energie) return 0;
+
+  // Numerischer Score: 5=Sehr gut (A+/A), 4=Gut (B), 3=Durchschnittlich (C/D), 2=Eher schlecht (E/F), 1=Sehr schlecht (G/H)
+  const score = Number(energie);
+  if (!isNaN(score) && String(energie).trim() !== '') {
+    if (score >= 5) return 0.03;
+    if (score >= 4) return 0;
+    if (score >= 3) return -0.01;
+    if (score >= 2) return -0.03;
+    return -0.06;
+  }
+
   const e = energie.toLowerCase();
   if (e.includes('sehr gut')) return 0.03;
-  if (e === 'gut' || e.includes('gut')) return 0;
+  if (e.includes('gut')) return 0;
   if (e.includes('durchschnittlich')) return -0.01;
   if (e.includes('eher schlecht')) return -0.03;
-  if (e.includes('sehr schlecht')) return -0.06;
+  if (e.includes('sehr schlecht') || e.includes('schlecht')) return -0.06;
   return 0;
 }
 
 function calcAusstattungFaktor(ausstattung: string | null): number {
   if (!ausstattung) return 0;
+
+  // Numerischer Score: 5=Stark gehoben, 4=Gehoben, 3=Mittel, 2=Einfach, 1=Schlecht
+  const score = Number(ausstattung);
+  if (!isNaN(score) && String(ausstattung).trim() !== '') {
+    if (score >= 5) return 0.05;
+    if (score >= 4) return 0.03;
+    if (score >= 3) return 0;
+    if (score >= 2) return -0.03;
+    return -0.05;
+  }
+
   const a = ausstattung.toLowerCase();
-  if (a.includes('stark gehoben')) return 0.05;
+  if (a.includes('stark gehoben') || a.includes('luxus')) return 0.05;
   if (a.includes('gehoben')) return 0.03;
-  if (a.includes('mittel') || a.includes('normal')) return 0;
+  if (a.includes('mittel') || a.includes('normal') || a.includes('standard')) return 0;
   if (a.includes('einfach')) return -0.03;
   if (a.includes('schlecht')) return -0.05;
   return 0;

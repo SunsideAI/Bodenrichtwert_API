@@ -285,6 +285,47 @@ app.get('/api/health', (c) => {
 });
 
 // ==========================================
+// GET /api/optionen — Gültige Feldwerte
+// ==========================================
+app.get('/api/optionen', (c) => {
+  return c.json({
+    hinweis: 'Für modernisierung, energie, ausstattung können alternativ numerische Scores 1–5 gesendet werden.',
+    modernisierung: [
+      { wert: 'Kernsanierung / Neuwertig', score: 5 },
+      { wert: 'Umfassend modernisiert',    score: 4 },
+      { wert: 'Teilweise modernisiert',    score: 3 },
+      { wert: 'Nur einzelne Maßnahmen',    score: 2 },
+      { wert: 'Keine Modernisierungen',    score: 1 },
+    ],
+    energie: [
+      { wert: 'Sehr gut',         score: 5, beispiel: 'A+, A' },
+      { wert: 'Gut',              score: 4, beispiel: 'B'     },
+      { wert: 'Durchschnittlich', score: 3, beispiel: 'C, D'  },
+      { wert: 'Eher schlecht',    score: 2, beispiel: 'E, F'  },
+      { wert: 'Sehr schlecht',    score: 1, beispiel: 'G, H'  },
+    ],
+    ausstattung: [
+      { wert: 'Stark gehoben', score: 5 },
+      { wert: 'Gehoben',       score: 4 },
+      { wert: 'Mittel',        score: 3 },
+      { wert: 'Einfach',       score: 2 },
+      { wert: 'Schlecht',      score: 1 },
+    ],
+    objektunterart: [
+      'Freistehendes Einfamilienhaus',
+      'Doppelhaushälfte',
+      'Reihenmittelhaus',
+      'Reihenendhaus',
+      'Zweifamilienhaus',
+      'Mehrfamilienhaus',
+      'Bungalow',
+      'Stadthaus',
+      'Bauernhaus / Resthof',
+    ],
+  });
+});
+
+// ==========================================
 // GET / — Einfache Startseite
 // ==========================================
 app.get('/', (c) => {
@@ -292,8 +333,9 @@ app.get('/', (c) => {
     name: 'BRW Enrichment API',
     version: '1.1.0',
     endpoints: {
-      enrich: 'POST /api/enrich',
-      health: 'GET /api/health',
+      enrich:   'POST /api/enrich',
+      optionen: 'GET /api/optionen',
+      health:   'GET /api/health',
     },
   });
 });
