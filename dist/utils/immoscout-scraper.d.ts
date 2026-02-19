@@ -6,7 +6,7 @@
  * und gibt strukturierte Preisdaten zurück.
  *
  * Quelle: atlas.immobilienscout24.de/orte/deutschland/{bundesland}/{stadt}
- * Fallback: immobilienscout24.de/Suche/de/{bundesland}/{kreis}/{ort}/haus-kaufen
+ * Fallback: IS24 Mobile API (api.mobile.immobilienscout24.de/search/list)
  */
 export declare const ATLAS_BASE = "https://atlas.immobilienscout24.de";
 export interface ImmoScoutPrices {
@@ -47,7 +47,7 @@ export declare function slugify(name: string): string;
  */
 export declare function scrapeImmoScoutAtlas(bundeslandSlug: string, stadtSlug: string, stadtteilSlug?: string): Promise<ImmoScoutPrices | null>;
 /**
- * Baut den IS24-Suche-URL-Slug für einen Landkreis.
+ * Baut den IS24-Geocode-Pfad-Slug für einen Landkreis.
  * "Landkreis Gifhorn" → "gifhorn-kreis"
  * "Kreis Soest" → "soest-kreis"
  * "Region Hannover" → "region-hannover"
@@ -55,10 +55,10 @@ export declare function scrapeImmoScoutAtlas(bundeslandSlug: string, stadtSlug: 
  */
 export declare function buildSearchKreisSlug(county: string): string;
 /**
- * Scrapt IS24 Suchseite und aggregiert Listing-Preise zu Marktdaten.
+ * IS24 Mobile API Suche: Aggregiert Listing-Preise zu Marktdaten.
  * Fallback für Orte ohne Atlas-Daten (z.B. Meine, Gifhorn-Kreis).
  *
- * URL-Format: /Suche/de/{bundesland}/{kreis}/{ort}/haus-kaufen
+ * Geocode-Pfad: /de/{bundesland}/{kreis}/{ort}
  */
 export declare function scrapeImmoScoutSearch(bundeslandSlug: string, kreisSlug: string | undefined, ortSlug: string, ortName: string): Promise<ImmoScoutPrices | null>;
 /**

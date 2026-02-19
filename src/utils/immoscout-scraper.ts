@@ -6,11 +6,12 @@
  * und gibt strukturierte Preisdaten zurück.
  *
  * Quelle: atlas.immobilienscout24.de/orte/deutschland/{bundesland}/{stadt}
- * Fallback: immobilienscout24.de/Suche/de/{bundesland}/{kreis}/{ort}/haus-kaufen
+ * Fallback: IS24 Mobile API (api.mobile.immobilienscout24.de/search/list)
  */
 
 export const ATLAS_BASE = 'https://atlas.immobilienscout24.de';
-const SEARCH_BASE = 'https://www.immobilienscout24.de';
+const MOBILE_API = 'https://api.mobile.immobilienscout24.de';
+const MOBILE_UA = 'ImmoScout_27.12_26.2_._';
 
 // ─── Rotierende User-Agents (aus Python-Scraper) ──────────────────────────
 
@@ -288,7 +289,9 @@ export async function scrapeImmoScoutAtlas(
   }
 }
 
-// ─── IS24 Suche Scraper (Fallback für Atlas-Lücken) ─────────────────────
+// ─── IS24 Mobile API Suche (Fallback für Atlas-Lücken) ──────────────────
+// Reverse-engineered Mobile API (Quellen: orangecoding/fredy, SunsideAI/Mutzel_Scraper)
+// Benötigt KEIN OAuth/Session — nur den Mobile-User-Agent.
 
 interface SearchListing {
   price: number;       // Gesamtpreis in €
@@ -297,7 +300,7 @@ interface SearchListing {
 }
 
 /**
- * Baut den IS24-Suche-URL-Slug für einen Landkreis.
+ * Baut den IS24-Geocode-Pfad-Slug für einen Landkreis.
  * "Landkreis Gifhorn" → "gifhorn-kreis"
  * "Kreis Soest" → "soest-kreis"
  * "Region Hannover" → "region-hannover"
@@ -321,122 +324,98 @@ export function buildSearchKreisSlug(county: string): string {
 }
 
 /**
- * Extrahiert Listing-Daten aus IS24-Suche-HTML.
- * Strategie 1: JSON-LD (application/ld+json)
- * Strategie 2: Regex-Extraktion aus Listing-Karten
+ * Einzelne Mobile-API-Suche für einen Immobilientyp.
+ * POST /search/list?searchType=region&realestatetype={type}&geocodes={geo}
  */
-function extractSearchListings(html: string): SearchListing[] {
-  const listings: SearchListing[] = [];
+async function mobileSearch(geocode: string, realestatetype: string): Promise<SearchListing[]> {
+  const params = new URLSearchParams({
+    searchType: 'region',
+    realestatetype,
+    geocodes: geocode,
+    pagenumber: '1',
+  });
+  const url = `${MOBILE_API}/search/list?${params}`;
 
-  // ── Strategie 1: JSON-LD ──
-  const jsonLdRegex = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = jsonLdRegex.exec(html)) !== null) {
-    try {
-      const data = JSON.parse(m[1].trim());
-      // IS24 kann ItemList oder einzelne Objekte liefern
-      const items = data['@type'] === 'ItemList'
-        ? (data.itemListElement || []).map((el: any) => el.item || el)
-        : [data];
+  console.log(`ImmoScout Mobile: POST ${realestatetype} geocode=${geocode}`);
 
-      for (const entry of items) {
-        const priceStr = String(entry?.offers?.price ?? entry?.offers?.lowPrice ?? '0');
-        const price = parseFloat(priceStr.replace(/[^\d.]/g, ''));
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'User-Agent': MOBILE_UA,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Connection': 'keep-alive',
+      },
+      body: JSON.stringify({
+        supportedResultListTypes: [],
+        userData: {},
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
 
-        const sizeStr = String(entry?.floorSize?.value ?? '0');
-        const size = parseFloat(sizeStr.replace(/[^\d.]/g, ''));
+    if (!res.ok) {
+      console.warn(`ImmoScout Mobile: HTTP ${res.status} for ${realestatetype}`);
+      return [];
+    }
 
-        if (price > 10000 && size > 10) {
-          listings.push({
-            price,
-            livingSpace: size,
-            pricePerSqm: Math.round(price / size),
-          });
-        }
-      }
-    } catch { /* skip malformed JSON-LD */ }
-  }
+    const data = await res.json() as any;
+    const listings: SearchListing[] = [];
 
-  if (listings.length >= 3) return listings;
+    // Response: items[] filtern nach type === 'EXPOSE_RESULT'
+    const items: any[] = data?.items || data?.resultlistEntries?.[0]?.resultlistEntry || [];
 
-  // ── Strategie 2: __NEXT_DATA__ (Next.js SSR) ──
-  const nextDataMatch = html.match(/<script[^>]*id\s*=\s*["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
-  if (nextDataMatch) {
-    try {
-      const nextData = JSON.parse(nextDataMatch[1].trim());
-      const results = nextData?.props?.pageProps?.searchResponseModel?.resultlistEntries?.[0]?.resultlistEntry
-        || nextData?.props?.pageProps?.resultList?.resultlistEntries?.[0]?.resultlistEntry
-        || [];
-      for (const entry of results) {
-        const attrs = entry?.resultlist?.resultlistEntry?.[0]?.attributes?.[0]?.attribute
-          || entry?.attributes?.[0]?.attribute
-          || [];
-        let price = 0;
-        let area = 0;
+    for (const item of items) {
+      // fredy-Format: item.type === 'EXPOSE_RESULT' → item.expose.item
+      const expose = item?.type === 'EXPOSE_RESULT'
+        ? item?.expose?.item
+        : item;
+
+      if (!expose) continue;
+
+      let price = 0;
+      let area = 0;
+
+      // Attributes-Array durchsuchen (Mobile-API-Format)
+      const attrSections: any[] = expose?.attributes || expose?.sections || [];
+      for (const section of attrSections) {
+        const attrs: any[] = section?.attributes || (Array.isArray(section) ? section : [section]);
         for (const attr of attrs) {
-          const label = String(attr.label || '').toLowerCase();
-          const value = String(attr.value || '');
+          const label = String(attr?.label || '').toLowerCase();
+          const text = String(attr?.text || attr?.value || '');
+
           if (label.includes('kaufpreis') || label.includes('preis')) {
-            price = parseFloat(value.replace(/[^\d,]/g, '').replace(',', '.'));
+            price = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
           }
-          if (label.includes('fläche') || label.includes('flaeche') || label.includes('wohnfläche')) {
-            area = parseFloat(value.replace(/[^\d,]/g, '').replace(',', '.'));
+          if (label.includes('wohnfläche') || label.includes('fläche ca')) {
+            area = parseFloat(text.replace(/[^\d,]/g, '').replace(',', '.'));
           }
-        }
-        if (price > 10000 && area > 10) {
-          listings.push({ price, livingSpace: area, pricePerSqm: Math.round(price / area) });
         }
       }
-    } catch { /* skip */ }
-  }
 
-  if (listings.length >= 3) return listings;
+      // Alternativ: direkte Felder (Mutzel_Scraper-Format)
+      if (!price && expose?.price) {
+        price = typeof expose.price === 'number' ? expose.price : parseFloat(String(expose.price).replace(/[^\d,]/g, '').replace(',', '.'));
+      }
+      if (!area && expose?.livingSpace) {
+        area = typeof expose.livingSpace === 'number' ? expose.livingSpace : parseFloat(String(expose.livingSpace).replace(/[^\d,]/g, '').replace(',', '.'));
+      }
 
-  // ── Strategie 3: HTML-Regex ──
-  // IS24 Listing-Karten enthalten typisch: "125.000 €" und "54 m²"
-  // Suche <article> oder <li> Blöcke mit beiden Patterns
-  const blockRegex = /<(?:article|li)[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/(?:article|li)>/gi;
-  let blockMatch: RegExpExecArray | null;
-  while ((blockMatch = blockRegex.exec(html)) !== null) {
-    const block = blockMatch[1];
-    const priceM = block.match(/([\d.]+(?:,\d+)?)\s*€/);
-    const areaM = block.match(/([\d.,]+)\s*m²/);
-
-    if (priceM && areaM) {
-      const price = parseFloat(priceM[1].replace(/\./g, '').replace(',', '.'));
-      const area = parseFloat(areaM[1].replace(/\./g, '').replace(',', '.'));
-
-      if (price > 10000 && area > 10 &&
-          !listings.some(l => l.price === price && l.livingSpace === area)) {
-        listings.push({ price, livingSpace: area, pricePerSqm: Math.round(price / area) });
+      if (price > 10000 && area > 10) {
+        listings.push({
+          price,
+          livingSpace: area,
+          pricePerSqm: Math.round(price / area),
+        });
       }
     }
+
+    console.log(`ImmoScout Mobile: ${listings.length} Listings (${realestatetype})`);
+    return listings;
+  } catch (err) {
+    console.warn(`ImmoScout Mobile: Fetch error (${realestatetype}):`, err);
+    return [];
   }
-
-  // ── Strategie 4: Breitere Regex (wenn keine Listing-Blöcke gefunden) ──
-  if (listings.length === 0) {
-    // Suche alle Preis+Fläche Paare die innerhalb von 500 Zeichen vorkommen
-    const allPrices = [...html.matchAll(/([\d.]{3,10}(?:,\d+)?)\s*€/g)];
-    const allAreas = [...html.matchAll(/([\d.,]{1,8})\s*m²/g)];
-
-    for (const pMatch of allPrices) {
-      const pIdx = pMatch.index!;
-      const price = parseFloat(pMatch[1].replace(/\./g, '').replace(',', '.'));
-      if (price < 20000 || price > 5000000) continue; // unrealistische Preise filtern
-
-      // Nächste Fläche innerhalb von 500 Zeichen finden
-      const nearArea = allAreas.find(a => Math.abs(a.index! - pIdx) < 500);
-      if (nearArea) {
-        const area = parseFloat(nearArea[1].replace(/\./g, '').replace(',', '.'));
-        if (area > 10 && area < 1000 &&
-            !listings.some(l => l.price === price && l.livingSpace === area)) {
-          listings.push({ price, livingSpace: area, pricePerSqm: Math.round(price / area) });
-        }
-      }
-    }
-  }
-
-  return listings;
 }
 
 function median(arr: number[]): number {
@@ -447,10 +426,10 @@ function median(arr: number[]): number {
 }
 
 /**
- * Scrapt IS24 Suchseite und aggregiert Listing-Preise zu Marktdaten.
+ * IS24 Mobile API Suche: Aggregiert Listing-Preise zu Marktdaten.
  * Fallback für Orte ohne Atlas-Daten (z.B. Meine, Gifhorn-Kreis).
  *
- * URL-Format: /Suche/de/{bundesland}/{kreis}/{ort}/haus-kaufen
+ * Geocode-Pfad: /de/{bundesland}/{kreis}/{ort}
  */
 export async function scrapeImmoScoutSearch(
   bundeslandSlug: string,
@@ -458,53 +437,21 @@ export async function scrapeImmoScoutSearch(
   ortSlug: string,
   ortName: string,
 ): Promise<ImmoScoutPrices | null> {
-  const hausListings: SearchListing[] = [];
-  const wohnungListings: SearchListing[] = [];
+  // Geocode-Pfad bauen: /de/{bundesland}/{kreis}/{ort}
+  const geoParts = ['/de', bundeslandSlug];
+  if (kreisSlug) geoParts.push(kreisSlug);
+  geoParts.push(ortSlug);
+  const geocode = geoParts.join('/');
 
-  for (const [type, target] of [
-    ['haus-kaufen', hausListings],
-    ['wohnung-kaufen', wohnungListings],
-  ] as const) {
-    // URL bauen: mit oder ohne Kreis
-    const pathParts = ['Suche', 'de', bundeslandSlug];
-    if (kreisSlug) pathParts.push(kreisSlug);
-    pathParts.push(ortSlug, type);
-    const url = `${SEARCH_BASE}/${pathParts.join('/')}`;
-
-    console.log(`ImmoScout Suche: Fetching ${url}`);
-
-    try {
-      const res = await fetch(url, {
-        headers: {
-          ...getRandomHeaders(),
-          'Referer': 'https://www.immobilienscout24.de/',
-        },
-        signal: AbortSignal.timeout(15000),
-        redirect: 'follow',
-      });
-
-      if (!res.ok) {
-        console.warn(`ImmoScout Suche: HTTP ${res.status} for ${url}`);
-        continue;
-      }
-
-      const html = await res.text();
-      if (html.length < 2000) {
-        console.warn(`ImmoScout Suche: Response zu kurz (${html.length} bytes)`);
-        continue;
-      }
-
-      const found = extractSearchListings(html);
-      console.log(`ImmoScout Suche: ${found.length} Listings für ${type} in ${ortName}`);
-      target.push(...found);
-    } catch (err) {
-      console.warn(`ImmoScout Suche: Fetch error for ${url}:`, err);
-    }
-  }
+  // Haus + Wohnung parallel suchen
+  const [hausListings, wohnungListings] = await Promise.all([
+    mobileSearch(geocode, 'housebuy'),
+    mobileSearch(geocode, 'apartmentbuy'),
+  ]);
 
   const total = hausListings.length + wohnungListings.length;
   if (total === 0) {
-    console.warn(`ImmoScout Suche: Keine Listings für ${ortName}`);
+    console.warn(`ImmoScout Mobile: Keine Listings für ${ortName} (${geocode})`);
     return null;
   }
 
@@ -512,7 +459,7 @@ export async function scrapeImmoScoutSearch(
   const hausPreise = hausListings.map(l => l.pricePerSqm);
   const wohnungPreise = wohnungListings.map(l => l.pricePerSqm);
 
-  console.log(`ImmoScout Suche: ${ortName} → ${hausListings.length} Häuser (Median ${median(hausPreise)} €/m²), ${wohnungListings.length} Wohnungen (Median ${median(wohnungPreise)} €/m²)`);
+  console.log(`ImmoScout Mobile: ${ortName} → ${hausListings.length} Häuser (Median ${hausPreise.length ? median(hausPreise) : '-'} €/m²), ${wohnungListings.length} Wohnungen (Median ${wohnungPreise.length ? median(wohnungPreise) : '-'} €/m²)`);
 
   return {
     stadt: ortName,
