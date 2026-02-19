@@ -41,12 +41,21 @@ export interface ImmoScoutPrices {
   stadt: string;
   stadtteil: string;
   bundesland: string;
+  // Kaufpreise (€/m²)
   haus_kauf_preis: number | null;
   haus_kauf_min: number | null;
   haus_kauf_max: number | null;
   wohnung_kauf_preis: number | null;
   wohnung_kauf_min: number | null;
   wohnung_kauf_max: number | null;
+  // Mietpreise (€/m²/Monat)
+  haus_miete_preis: number | null;
+  haus_miete_min: number | null;
+  haus_miete_max: number | null;
+  wohnung_miete_preis: number | null;
+  wohnung_miete_min: number | null;
+  wohnung_miete_max: number | null;
+  // Temporal
   jahr: number;
   quartal: number;
   lat: number;
@@ -143,15 +152,19 @@ function extractPriceForType(
  * Die "eigenen" Preise stehen in state.ownPrices oder ähnlich.
  */
 function extractOwnPrices(state: Record<string, any>): {
-  haus: PriceEntry;
-  wohnung: PriceEntry;
+  haus_kauf: PriceEntry;
+  wohnung_kauf: PriceEntry;
+  haus_miete: PriceEntry;
+  wohnung_miete: PriceEntry;
 } | null {
   // Variante 1: ownPrices
   const ownPrices = state.ownPrices || state.prices;
   if (ownPrices) {
     return {
-      haus: extractPriceForType(ownPrices, 'HOUSE_BUY'),
-      wohnung: extractPriceForType(ownPrices, 'APARTMENT_BUY'),
+      haus_kauf: extractPriceForType(ownPrices, 'HOUSE_BUY'),
+      wohnung_kauf: extractPriceForType(ownPrices, 'APARTMENT_BUY'),
+      haus_miete: extractPriceForType(ownPrices, 'HOUSE_RENT'),
+      wohnung_miete: extractPriceForType(ownPrices, 'APARTMENT_RENT'),
     };
   }
 
@@ -160,8 +173,10 @@ function extractOwnPrices(state: Record<string, any>): {
   if (tableData && tableData.length > 0) {
     const first = tableData[0].prices || {};
     return {
-      haus: extractPriceForType(first, 'HOUSE_BUY'),
-      wohnung: extractPriceForType(first, 'APARTMENT_BUY'),
+      haus_kauf: extractPriceForType(first, 'HOUSE_BUY'),
+      wohnung_kauf: extractPriceForType(first, 'APARTMENT_BUY'),
+      haus_miete: extractPriceForType(first, 'HOUSE_RENT'),
+      wohnung_miete: extractPriceForType(first, 'APARTMENT_RENT'),
     };
   }
 
@@ -244,21 +259,24 @@ export async function scrapeImmoScoutAtlas(
       return null;
     }
 
-    const haus = prices.haus;
-    const wohnung = prices.wohnung;
-
     return {
       stadt: geo.stadt || stadtSlug,
       stadtteil: geo.stadtteil || stadtteilSlug || '',
       bundesland: geo.bundesland || bundeslandSlug,
-      haus_kauf_preis: haus.price,
-      haus_kauf_min: haus.min,
-      haus_kauf_max: haus.max,
-      wohnung_kauf_preis: wohnung.price,
-      wohnung_kauf_min: wohnung.min,
-      wohnung_kauf_max: wohnung.max,
-      jahr: haus.year || wohnung.year,
-      quartal: haus.quarter || wohnung.quarter,
+      haus_kauf_preis: prices.haus_kauf.price,
+      haus_kauf_min: prices.haus_kauf.min,
+      haus_kauf_max: prices.haus_kauf.max,
+      wohnung_kauf_preis: prices.wohnung_kauf.price,
+      wohnung_kauf_min: prices.wohnung_kauf.min,
+      wohnung_kauf_max: prices.wohnung_kauf.max,
+      haus_miete_preis: prices.haus_miete.price,
+      haus_miete_min: prices.haus_miete.min,
+      haus_miete_max: prices.haus_miete.max,
+      wohnung_miete_preis: prices.wohnung_miete.price,
+      wohnung_miete_min: prices.wohnung_miete.min,
+      wohnung_miete_max: prices.wohnung_miete.max,
+      jahr: prices.haus_kauf.year || prices.wohnung_kauf.year,
+      quartal: prices.haus_kauf.quarter || prices.wohnung_kauf.quarter,
       lat: geo.lat,
       lng: geo.lng,
     };
@@ -300,24 +318,32 @@ export async function scrapeImmoScoutDistricts(
       const name = district.name || '';
       const pricesRaw = district.prices || {};
 
-      const haus = extractPriceForType(pricesRaw, 'HOUSE_BUY');
-      const wohnung = extractPriceForType(pricesRaw, 'APARTMENT_BUY');
+      const haus_kauf = extractPriceForType(pricesRaw, 'HOUSE_BUY');
+      const wohnung_kauf = extractPriceForType(pricesRaw, 'APARTMENT_BUY');
+      const haus_miete = extractPriceForType(pricesRaw, 'HOUSE_RENT');
+      const wohnung_miete = extractPriceForType(pricesRaw, 'APARTMENT_RENT');
 
-      if (!haus.price && !wohnung.price) continue;
+      if (!haus_kauf.price && !wohnung_kauf.price) continue;
 
       results.push({
         stadt: geo.stadt || stadtSlug,
         stadtteil: name,
         bundesland: geo.bundesland || bundeslandSlug,
-        haus_kauf_preis: haus.price,
-        haus_kauf_min: haus.min,
-        haus_kauf_max: haus.max,
-        wohnung_kauf_preis: wohnung.price,
-        wohnung_kauf_min: wohnung.min,
-        wohnung_kauf_max: wohnung.max,
-        jahr: haus.year || wohnung.year,
-        quartal: haus.quarter || wohnung.quarter,
-        lat: 0, // District-Level coordinates not available in table
+        haus_kauf_preis: haus_kauf.price,
+        haus_kauf_min: haus_kauf.min,
+        haus_kauf_max: haus_kauf.max,
+        wohnung_kauf_preis: wohnung_kauf.price,
+        wohnung_kauf_min: wohnung_kauf.min,
+        wohnung_kauf_max: wohnung_kauf.max,
+        haus_miete_preis: haus_miete.price,
+        haus_miete_min: haus_miete.min,
+        haus_miete_max: haus_miete.max,
+        wohnung_miete_preis: wohnung_miete.price,
+        wohnung_miete_min: wohnung_miete.min,
+        wohnung_miete_max: wohnung_miete.max,
+        jahr: haus_kauf.year || wohnung_kauf.year,
+        quartal: haus_kauf.quarter || wohnung_kauf.quarter,
+        lat: 0,
         lng: 0,
       });
     }
