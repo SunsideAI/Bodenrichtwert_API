@@ -5,11 +5,12 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  *
  * Nutzt den offiziellen Bayern-Geoportal WMS GetFeatureInfo Endpunkt.
  * URL: https://geoservices.bayern.de/wms/v1/ogc_bodenrichtwerte.cgi
+ * WMS-Version: 1.1.1 (!) – 1.3.0 liefert leere GetCapabilities.
  *
- * Layer-Discovery per GetCapabilities beim ersten Aufruf.
- * Probiert info_format text/plain, text/xml und text/html.
+ * Layer: bodenrichtwerte_aktuell (bestätigt via Geoportal Bayern)
+ * CRS: EPSG:25832 nativ, EPSG:4326 wird unterstützt
+ * BBOX (WMS 1.1.1, EPSG:4326): minlon,minlat,maxlon,maxlat
  *
- * CRS: EPSG:25832 (UTM Zone 32N, nativ), EPSG:4326 für BBOX
  * Lizenz: © Bayerische Vermessungsverwaltung (www.geodaten.bayern.de)
  */
 export class BayernAdapter implements BodenrichtwertAdapter {
@@ -19,13 +20,10 @@ export class BayernAdapter implements BodenrichtwertAdapter {
 
   private readonly wmsUrl = 'https://geoservices.bayern.de/wms/v1/ogc_bodenrichtwerte.cgi';
 
-  // Bekannte Layer-Kandidaten (werden via GetCapabilities ergänzt)
+  // Bekannte Layer (bestätigt via Geoportal-Viewer)
   private layerCandidates = [
     'bodenrichtwerte_aktuell',
-    'bodenrichtwerte_2024',
-    'bodenrichtwerte_2023',
-    'brw_aktuell',
-    'BRW',
+    'bodenrichtwerte',
     '0',
   ];
 
@@ -41,61 +39,76 @@ export class BayernAdapter implements BodenrichtwertAdapter {
       ? this.discoveredLayers
       : this.layerCandidates;
 
+    // Zwei CRS-Strategien: erst EPSG:4326, dann EPSG:25832 mit UTM-Konvertierung
     for (const layer of layersToTry) {
-      for (const fmt of ['text/plain', 'text/xml', 'application/json', 'text/html'] as const) {
+      // Strategie 1: EPSG:4326 (direkt mit lat/lon)
+      for (const fmt of ['text/xml', 'text/plain', 'text/html', 'application/json'] as const) {
         try {
-          const result = await this.queryWms(lat, lon, layer, fmt);
+          const result = await this.queryWms(lat, lon, layer, fmt, 'EPSG:4326');
           if (result) return result;
-        } catch {
-          // nächste Kombination
-        }
+        } catch { /* nächste Kombination */ }
+      }
+
+      // Strategie 2: EPSG:25832 (UTM-Konvertierung)
+      for (const fmt of ['text/xml', 'text/plain', 'text/html'] as const) {
+        try {
+          const result = await this.queryWms(lat, lon, layer, fmt, 'EPSG:25832');
+          if (result) return result;
+        } catch { /* nächste Kombination */ }
       }
     }
 
-    console.error('BY adapter: Kein Treffer mit allen Layer/Format-Kombinationen');
+    console.error('BY adapter: Kein Treffer mit allen Layer/Format/CRS-Kombinationen');
     return null;
   }
 
   private async discoverLayers(): Promise<string[]> {
-    try {
-      const params = new URLSearchParams({
-        SERVICE: 'WMS',
-        VERSION: '1.3.0',
-        REQUEST: 'GetCapabilities',
-      });
+    // Versuche beide WMS-Versionen für GetCapabilities
+    for (const version of ['1.1.1', '1.3.0']) {
+      try {
+        const params = new URLSearchParams({
+          SERVICE: 'WMS',
+          VERSION: version,
+          REQUEST: 'GetCapabilities',
+        });
 
-      const res = await fetch(`${this.wmsUrl}?${params}`, {
-        headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-        signal: AbortSignal.timeout(10000),
-      });
+        const res = await fetch(`${this.wmsUrl}?${params}`, {
+          headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
+          signal: AbortSignal.timeout(10000),
+        });
 
-      if (!res.ok) return [];
+        if (!res.ok) continue;
 
-      const xml = await res.text();
-      const layers: string[] = [];
+        const xml = await res.text();
+        const layers: string[] = [];
 
-      // Queryable Layer bevorzugen
-      const queryableRegex = /<Layer[^>]*queryable=["']1["'][^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
-      let match;
-      while ((match = queryableRegex.exec(xml)) !== null) {
-        layers.push(match[1].trim());
-      }
+        // Queryable Layer bevorzugen
+        const queryableRegex = /<Layer[^>]*queryable=["']1["'][^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
+        let match;
+        while ((match = queryableRegex.exec(xml)) !== null) {
+          layers.push(match[1].trim());
+        }
 
-      if (layers.length === 0) {
-        const nameRegex = /<Name>([^<]+)<\/Name>/g;
-        while ((match = nameRegex.exec(xml)) !== null) {
-          const name = match[1].trim();
-          if (name && !name.toLowerCase().includes('wms') && !name.toLowerCase().includes('service')) {
-            layers.push(name);
+        // Falls kein queryable-Attribut, alle Layer-Namen
+        if (layers.length === 0) {
+          const nameRegex = /<Layer[^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
+          while ((match = nameRegex.exec(xml)) !== null) {
+            const name = match[1].trim();
+            if (name && !name.toLowerCase().includes('wms') && !name.toLowerCase().includes('service')) {
+              layers.push(name);
+            }
           }
         }
-      }
 
-      return layers;
-    } catch (err) {
-      console.warn('BY GetCapabilities error:', err);
-      return [];
+        if (layers.length > 0) {
+          console.log(`BY GetCapabilities (v${version}): Found ${layers.length} layers`);
+          return layers;
+        }
+      } catch (err) {
+        console.warn(`BY GetCapabilities (v${version}) error:`, err);
+      }
     }
+    return [];
   }
 
   private async queryWms(
@@ -103,23 +116,32 @@ export class BayernAdapter implements BodenrichtwertAdapter {
     lon: number,
     layer: string,
     infoFormat: string,
+    srs: string,
   ): Promise<NormalizedBRW | null> {
-    // WMS 1.3.0: CRS=EPSG:4326 → Achsenreihenfolge lat,lon in BBOX
-    const delta = 0.001;
-    const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta}`;
+    let bbox: string;
+    if (srs === 'EPSG:25832') {
+      // WGS84 → UTM Zone 32N Konvertierung
+      const [e, n] = this.wgs84ToUtm32(lat, lon);
+      const delta = 50; // 50m Radius in UTM
+      bbox = `${e - delta},${n - delta},${e + delta},${n + delta}`;
+    } else {
+      // WMS 1.1.1 + EPSG:4326: BBOX = minlon,minlat,maxlon,maxlat
+      const delta = 0.001;
+      bbox = `${lon - delta},${lat - delta},${lon + delta},${lat + delta}`;
+    }
 
     const params = new URLSearchParams({
       SERVICE: 'WMS',
-      VERSION: '1.3.0',
+      VERSION: '1.1.1',
       REQUEST: 'GetFeatureInfo',
       LAYERS: layer,
       QUERY_LAYERS: layer,
-      CRS: 'EPSG:4326',
+      SRS: srs,
       BBOX: bbox,
       WIDTH: '101',
       HEIGHT: '101',
-      I: '50',
-      J: '50',
+      X: '50',
+      Y: '50',
       INFO_FORMAT: infoFormat,
       FEATURE_COUNT: '5',
       STYLES: '',
@@ -137,13 +159,59 @@ export class BayernAdapter implements BodenrichtwertAdapter {
     if (!text || text.length < 10) return null;
     if (text.includes('ServiceException') || text.includes('ExceptionReport')) return null;
 
-    console.log(`BY WMS [${layer}/${infoFormat}] response (300 chars):`, text.substring(0, 300));
+    console.log(`BY WMS [${layer}/${infoFormat}/${srs}] response (300 chars):`, text.substring(0, 300));
 
     if (infoFormat === 'application/json') return this.parseJson(text);
     if (infoFormat === 'text/plain') return this.parseTextPlain(text);
     if (infoFormat === 'text/xml') return this.parseXml(text);
     return this.parseHtml(text);
   }
+
+  // ─── WGS84 → UTM Zone 32N (vereinfachte Konvertierung) ────────────────────
+
+  private wgs84ToUtm32(lat: number, lon: number): [number, number] {
+    const a = 6378137.0;
+    const f = 1 / 298.257223563;
+    const k0 = 0.9996;
+    const e = Math.sqrt(2 * f - f * f);
+    const e2 = e * e;
+    const ep2 = e2 / (1 - e2);
+    const lon0 = 9; // UTM Zone 32 Zentralmeridian
+
+    const latRad = (lat * Math.PI) / 180;
+    const lonRad = ((lon - lon0) * Math.PI) / 180;
+
+    const N = a / Math.sqrt(1 - e2 * Math.sin(latRad) ** 2);
+    const T = Math.tan(latRad) ** 2;
+    const C = ep2 * Math.cos(latRad) ** 2;
+    const A = lonRad * Math.cos(latRad);
+
+    const M =
+      a *
+      ((1 - e2 / 4 - (3 * e2 ** 2) / 64 - (5 * e2 ** 3) / 256) * latRad -
+        ((3 * e2) / 8 + (3 * e2 ** 2) / 32 + (45 * e2 ** 3) / 1024) * Math.sin(2 * latRad) +
+        ((15 * e2 ** 2) / 256 + (45 * e2 ** 3) / 1024) * Math.sin(4 * latRad) -
+        ((35 * e2 ** 3) / 3072) * Math.sin(6 * latRad));
+
+    const easting =
+      500000 +
+      k0 *
+        N *
+        (A + ((1 - T + C) * A ** 3) / 6 + ((5 - 18 * T + T ** 2 + 72 * C - 58 * ep2) * A ** 5) / 120);
+
+    const northing =
+      k0 *
+      (M +
+        N *
+          Math.tan(latRad) *
+          (A ** 2 / 2 +
+            ((5 - T + 9 * C + 4 * C ** 2) * A ** 4) / 24 +
+            ((61 - 58 * T + T ** 2 + 600 * C - 330 * ep2) * A ** 6) / 720));
+
+    return [easting, northing];
+  }
+
+  // ─── Parser ────────────────────────────────────────────────────────────────
 
   private parseJson(text: string): NormalizedBRW | null {
     try {
@@ -176,29 +244,34 @@ export class BayernAdapter implements BodenrichtwertAdapter {
   }
 
   private parseTextPlain(text: string): NormalizedBRW | null {
-    // Format: "KEY = 'VALUE'" oder "KEY = VALUE"
-    if (!text.includes('=')) return null;
-
+    // Format: "KEY = 'VALUE'" oder "KEY = VALUE" oder "KEY: VALUE"
     const get = (key: string): string => {
-      const re = new RegExp(`^\\s*${key}\\s*=\\s*'?([^'\\n]*)'?`, 'im');
-      const m = text.match(re);
-      return m ? m[1].trim() : '';
+      const patterns = [
+        new RegExp(`^\\s*${key}\\s*=\\s*'?([^'\\n]*)'?`, 'im'),
+        new RegExp(`${key}[:\\s]+([^\\n]+)`, 'im'),
+      ];
+      for (const re of patterns) {
+        const m = text.match(re);
+        if (m) return m[1].trim();
+      }
+      return '';
     };
 
-    const brwRaw = get('BODENRICHTWERT') || get('BRW') || get('bodenrichtwert') || get('RICHTWERT');
+    const brwRaw = get('BODENRICHTWERT') || get('BRW') || get('bodenrichtwert')
+      || get('RICHTWERT') || get('richtwert') || get('brw');
     if (!brwRaw) return null;
 
-    const wert = parseFloat(brwRaw.replace(',', '.'));
+    const wert = parseFloat(brwRaw.replace(/\./g, '').replace(',', '.'));
     if (!wert || wert <= 0 || !isFinite(wert)) return null;
 
-    const stichtagRaw = get('STICHTAG') || get('DAT') || get('DATUM');
+    const stichtagRaw = get('STICHTAG') || get('stichtag') || get('DAT') || get('DATUM');
     return {
       wert,
-      stichtag: this.convertDate(stichtagRaw) || 'aktuell',
-      nutzungsart: get('NUTZUNGSART') || get('NUTZUNG') || get('ART') || 'unbekannt',
+      stichtag: this.convertDate(stichtagRaw) || stichtagRaw || 'aktuell',
+      nutzungsart: get('NUTZUNGSART') || get('nutzungsart') || get('NUTZUNG') || get('ART') || 'unbekannt',
       entwicklungszustand: get('ENTWICKLUNGSZUSTAND') || get('ENTW') || 'B',
       zone: get('BRWNUMMER') || get('ZONE') || get('BRZ') || '',
-      gemeinde: get('GEMEINDE') || get('GEM') || get('ORT') || '',
+      gemeinde: get('GEMEINDE') || get('gemeinde') || get('GEM') || get('ORT') || '',
       bundesland: 'Bayern',
       quelle: 'BORIS-Bayern (Bayerische Vermessungsverwaltung)',
       lizenz: '© Bayerische Vermessungsverwaltung, www.geodaten.bayern.de',
@@ -261,6 +334,8 @@ export class BayernAdapter implements BodenrichtwertAdapter {
     };
   }
 
+  // ─── Hilfsfunktionen ──────────────────────────────────────────────────────
+
   private extractNumber(xml: string, fields: string[]): number | null {
     for (const field of fields) {
       const re = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([\\d.,]+)<`, 'i');
@@ -271,7 +346,6 @@ export class BayernAdapter implements BodenrichtwertAdapter {
         const val = parseFloat(s);
         if (val > 0 && val <= 500_000 && isFinite(val)) return val;
       }
-      // Auch als Attribut: field="value"
       const attrRe = new RegExp(`\\b${field}=["']([\\d.,]+)["']`, 'i');
       const am = xml.match(attrRe);
       if (am) {
@@ -306,7 +380,7 @@ export class BayernAdapter implements BodenrichtwertAdapter {
     try {
       const params = new URLSearchParams({
         SERVICE: 'WMS',
-        VERSION: '1.3.0',
+        VERSION: '1.1.1',
         REQUEST: 'GetCapabilities',
       });
       const res = await fetch(`${this.wmsUrl}?${params}`, {
