@@ -40,7 +40,7 @@ if (token) {
  * "Landkreis Gifhorn" → "Gifhorn", "Kreis Soest" → "Soest", "München" → ""
  */
 function extractKreisname(county: string): string {
-  return county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.)\s+/i, '').trim();
+  return county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.|Städteregion|Regionalverband)\s+/i, '').trim();
 }
 
 /**

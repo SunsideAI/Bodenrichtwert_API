@@ -347,7 +347,7 @@ export function buildSearchKreisSlug(county: string): string {
   if (!county) return '';
 
   const isLandkreis = /^(Landkreis|Landkr\.|Kreis|Lkr\.)\s+/i.test(county);
-  const isRegion = /^Region\s+/i.test(county);
+  const isRegion = /^(Region|Städteregion|Regionalverband)\s+/i.test(county);
 
   if (isRegion) {
     return slugify(county); // "Region Hannover" → "region-hannover"
