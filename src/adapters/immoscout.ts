@@ -15,9 +15,9 @@ const NOMINATIM_URL = process.env.NOMINATIM_URL || 'https://nominatim.openstreet
  * 3. _atlas_initialState JSON parsen → haus_kauf_preis
  * 4. Preisabhängigen Faktor anwenden → BRW-Schätzwert
  *
- * Die Umrechnung nutzt preisabhängige Faktoren:
- * - Teure Lagen (>6000 €/m²): ~55% Bodenanteil
- * - Günstige Lagen (<1500 €/m²): ~22% Bodenanteil
+ * Die Umrechnung nutzt eine stetige logarithmische Funktion:
+ *   faktor = 0.165 × ln(preis) − 0.935, begrenzt auf [0.15, 0.60]
+ * Beispiele: 1000 €/m² → ~22%, 3000 €/m² → ~38%, 7000 €/m² → ~53%
  */
 export class ImmoScoutAdapter implements BodenrichtwertAdapter {
   state: string;
@@ -171,24 +171,22 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
   /**
    * Schätzt den Bodenrichtwert basierend auf dem Hauspreis.
    * Höhere Immobilienpreise → höherer Bodenanteil.
+   *
+   * Stetige logarithmische Funktion statt harter Stufen.
+   * Kalibriert an empirischen Stützpunkten:
+   *   1000 €/m² → ~22% Bodenanteil (ländlich)
+   *   2000 €/m² → ~30% (Kleinstadt)
+   *   3250 €/m² → ~38% (Suburban)
+   *   5000 €/m² → ~46% (Urban)
+   *   7000 €/m² → ~53% (Premium)
+   *
+   * Formel: faktor = 0.165 × ln(preis) − 0.935
+   * Grenzen: [0.15, 0.60] — ländlicher Mindestwert / Luxus-Obergrenze
    */
   private estimateBRW(hausKaufPreis: number): { wert: number; factor: number } {
-    if (hausKaufPreis >= 6000) {
-      // Premium urban (München Zentrum, Stuttgart Zentrum)
-      return { wert: Math.round(hausKaufPreis * 0.55), factor: 0.55 };
-    } else if (hausKaufPreis >= 4000) {
-      // Urban (Augsburg, Freiburg, Heidelberg)
-      return { wert: Math.round(hausKaufPreis * 0.45), factor: 0.45 };
-    } else if (hausKaufPreis >= 2500) {
-      // Suburban (Ulm, Regensburg, Karlsruhe Rand)
-      return { wert: Math.round(hausKaufPreis * 0.38), factor: 0.38 };
-    } else if (hausKaufPreis >= 1500) {
-      // Kleinstadt
-      return { wert: Math.round(hausKaufPreis * 0.30), factor: 0.30 };
-    } else {
-      // Ländlich
-      return { wert: Math.round(hausKaufPreis * 0.22), factor: 0.22 };
-    }
+    const rawFactor = 0.165 * Math.log(hausKaufPreis) - 0.935;
+    const factor = Math.round(Math.max(0.15, Math.min(0.60, rawFactor)) * 1000) / 1000;
+    return { wert: Math.round(hausKaufPreis * factor), factor };
   }
 
   async healthCheck(): Promise<boolean> {

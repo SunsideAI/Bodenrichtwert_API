@@ -64,11 +64,60 @@ export interface Bewertung {
   datenquellen: string[];
 }
 
-// ─── Korrekturfaktoren (1:1 aus Zapier-Code) ────────────────────────────────
+// ─── Lage-Cluster ────────────────────────────────────────────────────────────
+//
+// Regionalisierung: Korrekturfaktoren variieren nach Lagequalität.
+//   A-Lage: Teure Städte (BRW > 300 €/m² oder Hauspreis > 5000 €/m²)
+//           → Altbau-Premium, schwächere Abschläge
+//   B-Lage: Mittelstädte (BRW 80–300 oder Hauspreis 2000–5000)
+//           → Standard-Abschläge (wie bisher)
+//   C-Lage: Ländlich/strukturschwach (BRW < 80 oder Hauspreis < 2000)
+//           → Stärkere Abschläge für Alter/Zustand
 
-function calcBaujahrFaktor(baujahr: number | null): number {
+type LageCluster = 'A' | 'B' | 'C';
+
+function determineLageCluster(
+  brw: NormalizedBRW | null,
+  marktPreisProQm: number | null,
+): LageCluster {
+  const brwWert = brw?.wert ?? 0;
+  const preis = marktPreisProQm ?? 0;
+
+  // A-Lage: Premium-Standorte
+  if (brwWert > 300 || preis > 5000) return 'A';
+  // C-Lage: Strukturschwach / ländlich
+  if ((brwWert > 0 && brwWert < 80) || (brwWert === 0 && preis > 0 && preis < 2000)) return 'C';
+  // B-Lage: Standard (Default)
+  return 'B';
+}
+
+// ─── Korrekturfaktoren (regionalisiert nach Lage-Cluster) ───────────────────
+
+function calcBaujahrFaktor(baujahr: number | null, lage: LageCluster = 'B'): number {
   if (baujahr == null) return 0;
   if (baujahr >= 2020) return 0; // Neubau-Faktor übernimmt den Zeitwertbonus
+
+  // A-Lage: Altbau-Premium (Gründerzeit-Stuck, hohe Decken — Liebhaberwerte in Top-Lagen)
+  // C-Lage: Stärkere Abschläge (Leerstandsrisiko, geringere Nachfrage bei Altbauten)
+  if (lage === 'A') {
+    if (baujahr < 1950) return -0.08; // Altbau-Premium statt -0.20
+    if (baujahr <= 1969) return -0.06;
+    if (baujahr <= 1979) return -0.05;
+    if (baujahr <= 1994) return -0.03;
+    if (baujahr <= 2004) return -0.02;
+    if (baujahr <= 2010) return 0;
+    return 0.03;
+  }
+  if (lage === 'C') {
+    if (baujahr < 1950) return -0.25;
+    if (baujahr <= 1969) return -0.20;
+    if (baujahr <= 1979) return -0.16;
+    if (baujahr <= 1994) return -0.10;
+    if (baujahr <= 2004) return -0.05;
+    if (baujahr <= 2010) return 0;
+    return 0.03;
+  }
+  // B-Lage: Standard (unverändert)
   if (baujahr < 1950) return -0.20;
   if (baujahr <= 1969) return -0.15;
   if (baujahr <= 1979) return -0.12;
@@ -81,6 +130,7 @@ function calcBaujahrFaktor(baujahr: number | null): number {
 function calcModernisierungFaktor(
   modernisierung: string | null,
   baujahr: number | null,
+  lage: LageCluster = 'B',
 ): number {
   if (!modernisierung) return 0;
 
@@ -90,9 +140,11 @@ function calcModernisierungFaktor(
     const alter = baujahr ?? 2000;
     if (score >= 5) return 0.02;
     if (score >= 4) return 0;
-    if (score >= 3) return alter < 1970 ? -0.06 : alter < 1990 ? -0.04 : -0.04;
-    if (score >= 2) return alter < 1970 ? -0.10 : alter < 1990 ? -0.08 : -0.07;
-    return alter < 1970 ? -0.18 : alter < 1990 ? -0.12 : -0.06;
+    const baseFaktor =
+      score >= 3 ? (alter < 1970 ? -0.06 : alter < 1990 ? -0.04 : -0.04) :
+      score >= 2 ? (alter < 1970 ? -0.10 : alter < 1990 ? -0.08 : -0.07) :
+                   (alter < 1970 ? -0.18 : alter < 1990 ? -0.12 : -0.06);
+    return applyLageModernisierung(baseFaktor, lage);
   }
 
   const m = modernisierung.toLowerCase();
@@ -102,33 +154,42 @@ function calcModernisierungFaktor(
   if (m.includes('umfassend') || m.includes('vollständig') || m.includes('vollsaniert')) return 0;
 
   if (m.includes('teilweise') || m.includes('teilsaniert')) {
-    if (baujahr && baujahr < 1970) return -0.06;
-    if (baujahr && baujahr < 1990) return -0.04;
-    return -0.04;
+    const base = (baujahr && baujahr < 1970) ? -0.06 : (baujahr && baujahr < 1990) ? -0.04 : -0.04;
+    return applyLageModernisierung(base, lage);
   }
 
   if (m.includes('nur einzelne') || m.includes('einzelne maßnahmen') || m.includes('einzelne')) {
-    if (baujahr && baujahr < 1970) return -0.10;
-    if (baujahr && baujahr < 1990) return -0.08;
-    return -0.07;
+    const base = (baujahr && baujahr < 1970) ? -0.10 : (baujahr && baujahr < 1990) ? -0.08 : -0.07;
+    return applyLageModernisierung(base, lage);
   }
 
   if (m.includes('keine') || m.includes('unsaniert') || m.includes('unrenoviert')) {
-    if (baujahr && baujahr < 1970) return -0.18;
-    if (baujahr && baujahr < 1990) return -0.12;
-    return -0.06;
+    const base = (baujahr && baujahr < 1970) ? -0.18 : (baujahr && baujahr < 1990) ? -0.12 : -0.06;
+    return applyLageModernisierung(base, lage);
   }
 
   // "mittel" / "normal" / "durchschnittlich" = Zustand durchschnittlich,
   // typisch für ältere Gebäude ohne umfassende Sanierung aber bewohnbar.
   // Entspricht Modernisierungsgrad 2.5–3 auf der Skala.
   if (m.includes('mittel') || m.includes('normal') || m.includes('durchschnittlich')) {
-    if (baujahr && baujahr < 1970) return -0.08;
-    if (baujahr && baujahr < 1990) return -0.05;
-    return -0.02;
+    if (baujahr && baujahr < 1970) return applyLageModernisierung(-0.08, lage);
+    if (baujahr && baujahr < 1990) return applyLageModernisierung(-0.05, lage);
+    return applyLageModernisierung(-0.02, lage);
   }
 
   return 0;
+}
+
+/**
+ * Skaliert negative Modernisierungsfaktoren nach Lage-Cluster.
+ * A-Lage: 30% milder (Premium-Standorte halten Wert trotz weniger Modernisierung)
+ * C-Lage: 30% strenger (schwache Märkte bestrafen fehlende Modernisierung stärker)
+ */
+function applyLageModernisierung(baseFaktor: number, lage: LageCluster): number {
+  if (baseFaktor >= 0) return baseFaktor; // Positive Faktoren nicht skalieren
+  if (lage === 'A') return Math.round(baseFaktor * 0.7 * 100) / 100;
+  if (lage === 'C') return Math.round(baseFaktor * 1.3 * 100) / 100;
+  return baseFaktor;
 }
 
 function calcEnergieFaktor(energie: string | null): number {
@@ -225,9 +286,16 @@ function calcStichtagKorrektur(
  * Empirisch liegt der Angebots-Kaufpreis-Abschlag bei 5–15 % je nach Markt
  * (vgl. empirica Preisdatenbank, Sprengnetter Marktwertmodell).
  *
- * Wir verwenden 10 % als konservativen Mittelwert.
+ * Regionalisiert nach Lage-Cluster:
+ *   A-Lage (Verkäufermarkt): ~7% Abschlag (Käufer bieten nahe am Angebotspreis)
+ *   B-Lage (ausgeglichen):   ~10% Abschlag (Standard)
+ *   C-Lage (Käufermarkt):    ~13% Abschlag (mehr Verhandlungsspielraum)
  */
-const ANGEBOTSPREIS_ABSCHLAG = 0.90;
+function calcAngebotspreisAbschlag(lage: LageCluster): number {
+  if (lage === 'A') return 0.93;
+  if (lage === 'C') return 0.87;
+  return 0.90;
+}
 
 // ─── Fallback-Konstanten ─────────────────────────────────────────────────────
 
@@ -361,12 +429,13 @@ function calcAdjustedQmPreis(
   min: number | null,
   max: number | null,
   faktorenGesamt: number,
+  angebotspreisAbschlag: number = 0.90,
 ): number {
   const SCALE = 0.15;
   // Angebotspreis → geschätzter Kaufpreis
-  const adjMedian = median * ANGEBOTSPREIS_ABSCHLAG;
-  const adjMin = min != null ? min * ANGEBOTSPREIS_ABSCHLAG : null;
-  const adjMax = max != null ? max * ANGEBOTSPREIS_ABSCHLAG : null;
+  const adjMedian = median * angebotspreisAbschlag;
+  const adjMin = min != null ? min * angebotspreisAbschlag : null;
+  const adjMax = max != null ? max * angebotspreisAbschlag : null;
 
   if (adjMin != null && adjMax != null && adjMin < adjMedian && adjMax > adjMedian) {
     // Wide-spread detection: Wenn der Min/Max-Bereich >120% des Medians ist,
@@ -514,14 +583,18 @@ export function buildBewertung(
   const marktPreisMax = selectMarktpreisMax(marktdaten, istHaus);
   const mietPreisProQm = selectMietpreis(marktdaten, istHaus);
 
+  // ─── Lage-Cluster bestimmen (für regionalisierte Faktoren) ────────────────
+  const lageCluster = determineLageCluster(brw, marktPreisProQm);
+  const angebotspreisAbschlag = calcAngebotspreisAbschlag(lageCluster);
+
   // ─── Grundfläche: verwende Original oder schätze (NUR für Häuser) ───────────
   let grundflaeche = input.grundstuecksflaeche || 0;
   let grundflaecheGeschaetzt = false;
 
   // Faktoren berechnen
   const faktoren: BewertungFaktoren = {
-    baujahr: calcBaujahrFaktor(input.baujahr),
-    modernisierung: calcModernisierungFaktor(input.modernisierung, input.baujahr),
+    baujahr: calcBaujahrFaktor(input.baujahr, lageCluster),
+    modernisierung: calcModernisierungFaktor(input.modernisierung, input.baujahr, lageCluster),
     energie: calcEnergieFaktor(input.energie),
     ausstattung: calcAusstattungFaktor(input.ausstattung),
     objektunterart: calcObjektunterartFaktor(input.objektunterart),
@@ -570,6 +643,12 @@ export function buildBewertung(
   const hinweise: string[] = [...validationHinweise];
   const datenquellen: string[] = [];
 
+  // Lage-Cluster Info
+  if (lageCluster !== 'B') {
+    const lageLabel = lageCluster === 'A' ? 'A-Lage (Premium)' : 'C-Lage (ländlich/strukturschwach)';
+    hinweise.push(`Lage-Cluster: ${lageLabel}. Korrekturfaktoren und Angebotspreis-Abschlag (${Math.round((1 - angebotspreisAbschlag) * 100)}%) regional angepasst.`);
+  }
+
   // Überlapp-Korrektur: Neubau schließt positiven Modernisierungs-Bonus ein
   // (Ein Neubau >= 2020 ist per Definition neuwertig — kein zusätzlicher Kernsanierungs-Bonus)
   if (faktoren.neubau > 0 && faktoren.modernisierung > 0) {
@@ -591,7 +670,7 @@ export function buildBewertung(
     // Marktwert = Wohnfläche × faktor-adjustierter Vergleichspreis
     // Min/Max-Interpolation: Faktoren positionieren innerhalb der realen Marktspanne
     // Bodenwertanteil ist im Vergleichswert enthalten (kein separater Abzug)
-    const adjustedQmPreis = calcAdjustedQmPreis(marktPreisProQm!, marktPreisMin, marktPreisMax, faktoren.gesamt);
+    const adjustedQmPreis = calcAdjustedQmPreis(marktPreisProQm!, marktPreisMin, marktPreisMax, faktoren.gesamt, angebotspreisAbschlag);
     const vergleichswert = Math.round(adjustedQmPreis * wohnflaeche);
 
     // Ertragswert für Wohnungen (Gewichtung 80/20 wenn Mietdaten verfügbar)
@@ -608,6 +687,7 @@ export function buildBewertung(
         brwProQm: brwProQmProxy,
         baujahr: input.baujahr,
         gebaeudTyp: mapToErtragswertTyp(input.art, input.objektunterart),
+        bundesland,
       });
 
       if (ertragswertResult && ertragswertResult.ertragswert > 0) {
@@ -647,7 +727,7 @@ export function buildBewertung(
     bodenwert = Math.round(brwKorrigiert * grundflaeche);
 
     if (marktPreisProQm) {
-      const adjustedQmPreisSachwert = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt);
+      const adjustedQmPreisSachwert = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt, angebotspreisAbschlag);
       const marktGesamt = adjustedQmPreisSachwert * wohnflaeche;
       gebaeudewert = Math.round(Math.max(0, marktGesamt - bodenwert));
       if (marktGesamt - bodenwert < 0) {
@@ -668,7 +748,7 @@ export function buildBewertung(
       const nhk = calcGebaeudewertNHK(
         wohnflaeche, input.baujahr,
         input.objektunterart, input.ausstattung, input.modernisierung,
-        istHaus, brw!.wert, externalBpi,
+        istHaus, brw!.wert, externalBpi, bundesland,
       );
       gebaeudewert = nhk.gebaeudewert;
       datenquellen.push('BORIS/WFS Bodenrichtwert', 'NHK 2010 (ImmoWertV 2022)');
@@ -706,6 +786,7 @@ export function buildBewertung(
         brwProQm: brw!.wert,
         baujahr: input.baujahr,
         gebaeudTyp: mapToErtragswertTyp(input.art, input.objektunterart),
+        bundesland,
       });
 
       if (ertragswertResult && ertragswertResult.ertragswert > 0) {
@@ -730,7 +811,7 @@ export function buildBewertung(
   } else {
     // ─── Marktpreis-Indikation / Bundesdurchschnitt-Fallback ───
     if (marktPreisProQm) {
-      const korrigierterQmPreis = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt);
+      const korrigierterQmPreis = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt, angebotspreisAbschlag);
       realistischerImmobilienwert = Math.round(korrigierterQmPreis * wohnflaeche);
 
       if (hasBRW && grundflaeche > 0) {
@@ -797,7 +878,7 @@ export function buildBewertung(
 
   // Cross-Validation (Marktpreis ebenfalls um Angebotspreis-Abschlag korrigiert)
   if (marktPreisProQm && hasBRW) {
-    const pureMarktWert = marktPreisProQm * ANGEBOTSPREIS_ABSCHLAG * wohnflaeche;
+    const pureMarktWert = marktPreisProQm * angebotspreisAbschlag * wohnflaeche;
     const deviation = Math.abs(realistischerImmobilienwert - pureMarktWert) / pureMarktWert;
     if (deviation > 0.25) {
       hinweise.push(
@@ -831,11 +912,11 @@ export function buildBewertung(
   // Allgemeiner Hinweis zur Marktdaten-Granularität
   if (marktdaten?.stadtteil) {
     hinweise.push(
-      `Marktpreise basieren auf Stadtteil-Daten für ${marktdaten.stadtteil} (ImmoScout24 Atlas, ${Math.round((1 - ANGEBOTSPREIS_ABSCHLAG) * 100)}% Angebotspreis-Abschlag).`,
+      `Marktpreise basieren auf Stadtteil-Daten für ${marktdaten.stadtteil} (ImmoScout24 Atlas, ${Math.round((1 - angebotspreisAbschlag) * 100)}% Angebotspreis-Abschlag).`,
     );
   } else if (marktdaten) {
     hinweise.push(
-      `Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas, ${Math.round((1 - ANGEBOTSPREIS_ABSCHLAG) * 100)}% Angebotspreis-Abschlag). Lage-spezifische Abweichungen möglich.`,
+      `Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas, ${Math.round((1 - angebotspreisAbschlag) * 100)}% Angebotspreis-Abschlag). Lage-spezifische Abweichungen möglich.`,
     );
   }
 

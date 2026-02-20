@@ -1,0 +1,9 @@
+{
+  "_meta": {
+    "beschreibung": "Durchschnittliche Bodenrichtwerte pro Landkreis/kreisfreie Stadt",
+    "quelle": "Obere Gutachterausschüsse + BORIS-D Aggregation",
+    "stand": null,
+    "hinweis": "Diese Datei wird durch scripts/extract-gmb.ts befüllt. Dient als Kalibrierung für BRW-Schätzungen in BY/BW."
+  },
+  "landkreise": {}
+}

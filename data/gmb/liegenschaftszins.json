@@ -1,0 +1,9 @@
+{
+  "_meta": {
+    "beschreibung": "Regionale Liegenschaftszinssätze aus Grundstücksmarktberichten",
+    "quelle": "Obere Gutachterausschüsse der Bundesländer",
+    "stand": null,
+    "hinweis": "Diese Datei wird durch scripts/extract-gmb.ts befüllt. Manuelle Einträge möglich."
+  },
+  "bundeslaender": {}
+}
