@@ -56,13 +56,19 @@ function loadGMBLiegenschaftszins() {
  *   2. BRW-basierte Interpolation (Fallback, hardcoded Ranges)
  */
 function deriveLiegenschaftszins(typ, brwProQm, bundesland) {
-    // 1. Versuch: GMB-Daten
+    // 1. Versuch: GMB-Daten (mit BRW-basierter Interpolation innerhalb min/max)
     if (bundesland) {
         const gmb = loadGMBLiegenschaftszins();
         if (gmb?.bundeslaender[bundesland]) {
             const blData = gmb.bundeslaender[bundesland];
             const match = blData.daten.find(d => d.teilmarkt === typ);
             if (match && match.zins > 0) {
+                // Wenn min/max verfügbar: innerhalb GMB-Range nach BRW interpolieren
+                if (match.min != null && match.max != null && match.min < match.max) {
+                    const brwNorm = Math.min(Math.max(brwProQm, 0), 500) / 500;
+                    const zins = match.max - brwNorm * (match.max - match.min);
+                    return Math.round(zins * 1000) / 1000;
+                }
                 return Math.round(match.zins * 1000) / 1000;
             }
         }

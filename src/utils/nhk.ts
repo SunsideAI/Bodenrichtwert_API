@@ -353,8 +353,15 @@ export function calcGebaeudewertNHK(
   // 2. NHK 2010 Kostenkennwert (EUR/m² BGF)
   const nhk2010 = NHK_2010[typ][stufe];
 
-  // 3. BGF schätzen
-  const bgfFaktor = BGF_FAKTOR[typ];
+  // 3. BGF schätzen (altersabhängig: Altbauten haben mehr Nebenflächen, Neubauten effizienter)
+  let bgfFaktor = BGF_FAKTOR[typ];
+  if (baujahr != null) {
+    if (baujahr < 1970) {
+      bgfFaktor *= 1.05; // Altbauten: dickere Wände, größere Treppenhäuser, Keller
+    } else if (baujahr > 2010) {
+      bgfFaktor *= 0.97; // Neubauten: effizientere Grundrisse, dünnere Wände (Dämmung außen)
+    }
+  }
   const bgf = Math.round(wohnflaeche * bgfFaktor);
 
   // 4. Baupreisindex-Anpassung (2010 → aktuell)
