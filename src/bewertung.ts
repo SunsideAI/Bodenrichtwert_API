@@ -119,6 +119,15 @@ function calcModernisierungFaktor(
     return -0.06;
   }
 
+  // "mittel" / "normal" / "durchschnittlich" = Zustand durchschnittlich,
+  // typisch für ältere Gebäude ohne umfassende Sanierung aber bewohnbar.
+  // Entspricht Modernisierungsgrad 2.5–3 auf der Skala.
+  if (m.includes('mittel') || m.includes('normal') || m.includes('durchschnittlich')) {
+    if (baujahr && baujahr < 1970) return -0.08;
+    if (baujahr && baujahr < 1990) return -0.05;
+    return -0.02;
+  }
+
   return 0;
 }
 
@@ -208,6 +217,17 @@ function calcStichtagKorrektur(
   if (diffYears <= 2) return 0;
   return Math.round(diffYears - 2) * 0.025;
 }
+
+// ─── Angebotspreis → Kaufpreis Korrektur ─────────────────────────────────────
+
+/**
+ * ImmoScout24-Daten sind Angebotspreise (Listing-Preise), keine Kaufpreise.
+ * Empirisch liegt der Angebots-Kaufpreis-Abschlag bei 5–15 % je nach Markt
+ * (vgl. empirica Preisdatenbank, Sprengnetter Marktwertmodell).
+ *
+ * Wir verwenden 10 % als konservativen Mittelwert.
+ */
+const ANGEBOTSPREIS_ABSCHLAG = 0.90;
 
 // ─── Fallback-Konstanten ─────────────────────────────────────────────────────
 
@@ -304,6 +324,13 @@ function selectMarktpreisMax(marktdaten: ImmoScoutPrices | null, istHaus: boolea
  * anhand der Faktorsumme bestimmt (ImmoWertV § 15 Vergleichswertverfahren).
  *
  * SCALE = 0.15: Bei Faktorsumme ±0.15 → voll bei min/max.
+ *
+ * Angebotspreis-Abschlag: ImmoScout-Daten sind Listing-Preise. Echte Kaufpreise
+ * liegen ca. 10 % darunter (empirica / Sprengnetter).
+ *
+ * Extrapolation: Bei Faktoren jenseits SCALE darf der Preis sanft unter min
+ * sinken (30 % der normalen Steigung), da reale Transaktionspreise unter dem
+ * günstigsten Listing liegen können (ältere/schlechtere Objekte).
  */
 function calcAdjustedQmPreis(
   median: number,
@@ -312,15 +339,33 @@ function calcAdjustedQmPreis(
   faktorenGesamt: number,
 ): number {
   const SCALE = 0.15;
-  if (min != null && max != null && min < median && max > median) {
-    const t = Math.max(-1, Math.min(1, faktorenGesamt / SCALE));
+  // Angebotspreis → geschätzter Kaufpreis
+  const adjMedian = median * ANGEBOTSPREIS_ABSCHLAG;
+  const adjMin = min != null ? min * ANGEBOTSPREIS_ABSCHLAG : null;
+  const adjMax = max != null ? max * ANGEBOTSPREIS_ABSCHLAG : null;
+
+  if (adjMin != null && adjMax != null && adjMin < adjMedian && adjMax > adjMedian) {
+    const tRaw = faktorenGesamt / SCALE; // unbounded
+    const t = Math.max(-1, Math.min(1, tRaw));
+
+    let price: number;
     if (t < 0) {
-      return median - Math.abs(t) * (median - min);
+      price = adjMedian - Math.abs(t) * (adjMedian - adjMin);
+    } else {
+      price = adjMedian + t * (adjMax - adjMedian);
     }
-    return median + t * (max - median);
+
+    // Sanfte Extrapolation unter min (30 % Steigung) für stark negative Faktoren
+    if (tRaw < -1) {
+      const extraT = Math.abs(tRaw) - 1; // positiver Überschuss
+      const extraSlope = 0.30; // gedämpfte Steigung jenseits min
+      price -= extraT * extraSlope * (adjMedian - adjMin);
+    }
+
+    return Math.max(price, adjMedian * 0.25); // Untergrenze: 25 % des Medians
   }
-  // Fallback: kein min/max (z.B. Atlas-Daten) → klassische Prozent-Methode
-  return median * (1 + faktorenGesamt);
+  // Fallback: kein min/max (z.B. Atlas-Daten) → klassische Prozent-Methode + Abschlag
+  return adjMedian * (1 + faktorenGesamt);
 }
 
 function selectMietpreis(marktdaten: ImmoScoutPrices | null, istHaus: boolean): number | null {
@@ -711,9 +756,9 @@ export function buildBewertung(
     max: Math.round(realistischerImmobilienwert * (1 + spread)),
   };
 
-  // Cross-Validation
+  // Cross-Validation (Marktpreis ebenfalls um Angebotspreis-Abschlag korrigiert)
   if (marktPreisProQm && hasBRW) {
-    const pureMarktWert = marktPreisProQm * wohnflaeche;
+    const pureMarktWert = marktPreisProQm * ANGEBOTSPREIS_ABSCHLAG * wohnflaeche;
     const deviation = Math.abs(realistischerImmobilienwert - pureMarktWert) / pureMarktWert;
     if (deviation > 0.25) {
       hinweise.push(
@@ -747,11 +792,11 @@ export function buildBewertung(
   // Allgemeiner Hinweis zur Marktdaten-Granularität
   if (marktdaten?.stadtteil) {
     hinweise.push(
-      `Marktpreise basieren auf Stadtteil-Daten für ${marktdaten.stadtteil} (ImmoScout24 Atlas).`,
+      `Marktpreise basieren auf Stadtteil-Daten für ${marktdaten.stadtteil} (ImmoScout24 Atlas, ${Math.round((1 - ANGEBOTSPREIS_ABSCHLAG) * 100)}% Angebotspreis-Abschlag).`,
     );
   } else if (marktdaten) {
     hinweise.push(
-      'Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas). Lage-spezifische Abweichungen möglich.',
+      `Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas, ${Math.round((1 - ANGEBOTSPREIS_ABSCHLAG) * 100)}% Angebotspreis-Abschlag). Lage-spezifische Abweichungen möglich.`,
     );
   }
 
