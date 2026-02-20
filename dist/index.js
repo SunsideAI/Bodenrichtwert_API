@@ -8,6 +8,7 @@ import { routeToAdapter } from './state-router.js';
 import { cache, immoCache } from './cache.js';
 import { buildEnrichment } from './enrichment.js';
 import { buildBewertung } from './bewertung.js';
+import { validateBewertung, clearValidationCache, validationCacheStats } from './llm-validator.js';
 import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify, normalizeCityForIS24, generateCitySlugVariants } from './utils/immoscout-scraper.js';
 import { fetchPreisindex } from './utils/bundesbank.js';
 import { fetchImmobilienrichtwert } from './utils/nrw-irw.js';
@@ -241,8 +242,8 @@ function mapArtToTeilmarkt(art) {
     // Default für Einfamilienhaus, Zweifamilienhaus etc.
     return 'EFH';
 }
-function buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, baupreisindex, bundesland) {
-    return buildBewertung({
+function parseBewertungInput(body) {
+    return {
         art: body.art || null,
         grundstuecksflaeche: parseNum(body.grundstuecksflaeche),
         wohnflaeche: parseNum(body.wohnflaeche),
@@ -251,7 +252,10 @@ function buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, baupr
         modernisierung: body.modernisierung || null,
         energie: body.energie || null,
         ausstattung: body.ausstattung || null,
-    }, brw, marktdaten, preisindex, irw, baupreisindex, bundesland);
+    };
+}
+function buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, baupreisindex, bundesland) {
+    return buildBewertung(parseBewertungInput(body), brw, marktdaten, preisindex, irw, baupreisindex, bundesland);
 }
 // ==========================================
 // POST /api/enrich — Hauptendpunkt für Zapier
@@ -311,10 +315,14 @@ app.post('/api/enrich', async (c) => {
         // 3. BRW-Cache prüfen
         const cacheKey = `${geo.lat.toFixed(5)}:${geo.lon.toFixed(5)}`;
         const cached = cache.get(cacheKey);
+        // Geparster Input für Bewertung + Validierung
+        const bewertungInput = parseBewertungInput(body);
         if (cached) {
             const [marktdaten, preisindex, irw, bpi] = await Promise.all([
                 marktdatenPromise, preisindexPromise, irwPromise, baupreisindexPromise,
             ]);
+            const bewertung = buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi, geo.state);
+            const validation = await validateBewertung(bewertungInput, bewertung, cached, adressString, geo.state);
             const elapsed = Date.now() - start;
             return c.json({
                 status: 'success',
@@ -322,7 +330,8 @@ app.post('/api/enrich', async (c) => {
                 bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') },
                 marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
                 erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
-                bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi, geo.state),
+                bewertung,
+                validation,
                 meta: { cached: true, response_time_ms: elapsed },
             });
         }
@@ -332,6 +341,8 @@ app.post('/api/enrich', async (c) => {
             const [marktdaten, preisindex, irw, bpi] = await Promise.all([
                 marktdatenPromise, preisindexPromise, irwPromise, baupreisindexPromise,
             ]);
+            const bewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
+            const validation = await validateBewertung(bewertungInput, bewertung, null, adressString, geo.state);
             const elapsed = Date.now() - start;
             return c.json({
                 status: 'manual_required',
@@ -346,7 +357,8 @@ app.post('/api/enrich', async (c) => {
                 },
                 marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
                 erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-                bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state),
+                bewertung,
+                validation,
                 meta: { cached: false, response_time_ms: elapsed },
             });
         }
@@ -360,6 +372,8 @@ app.post('/api/enrich', async (c) => {
         ]);
         const elapsed = Date.now() - start;
         if (!brw) {
+            const bewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
+            const validation = await validateBewertung(bewertungInput, bewertung, null, adressString, geo.state);
             return c.json({
                 status: 'not_found',
                 input_echo: inputEcho,
@@ -371,7 +385,8 @@ app.post('/api/enrich', async (c) => {
                 },
                 marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
                 erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-                bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state),
+                bewertung,
+                validation,
                 meta: { cached: false, response_time_ms: elapsed },
             });
         }
@@ -379,14 +394,17 @@ app.post('/api/enrich', async (c) => {
         if (brw.wert > 0) {
             cache.set(cacheKey, brw);
         }
-        // 7. Response
+        // 7. Bewertung + LLM-Validierung
+        const bewertung = buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi, geo.state);
+        const validation = await validateBewertung(bewertungInput, bewertung, brw, adressString, geo.state);
         return c.json({
             status: 'success',
             input_echo: inputEcho,
             bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') },
             marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
             erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
-            bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi, geo.state),
+            bewertung,
+            validation,
             meta: { cached: false, response_time_ms: elapsed },
         });
     }
@@ -405,7 +423,8 @@ app.post('/api/enrich', async (c) => {
 app.delete('/api/cache', (c) => {
     const brwRemoved = cache.clear();
     const immoRemoved = immoCache.clear();
-    return c.json({ status: 'ok', removed: { brw: brwRemoved, immoscout: immoRemoved } });
+    const validationRemoved = clearValidationCache();
+    return c.json({ status: 'ok', removed: { brw: brwRemoved, immoscout: immoRemoved, validation: validationRemoved } });
 });
 // ==========================================
 // GET /api/health — Statuscheck
@@ -417,6 +436,12 @@ app.get('/api/health', (c) => {
         cache: {
             brw: cache.stats(),
             immoscout: immoCache.stats(),
+            validation: validationCacheStats(),
+        },
+        llm_validation: {
+            enabled: !!process.env.ANTHROPIC_API_KEY,
+            model: process.env.LLM_MODEL || 'claude-sonnet-4-5-20250929',
+            timeout_ms: parseInt(process.env.LLM_TIMEOUT_MS || '8000', 10),
         },
         timestamp: new Date().toISOString(),
     });
