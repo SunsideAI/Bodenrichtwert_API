@@ -219,7 +219,7 @@ function runUnitTests() {
   {
     console.log('Test 8: Korrekturfaktoren werden korrekt summiert');
     const input = mockInput({
-      baujahr: 1940,              // -0.10 (< 1950)
+      baujahr: 1940,              // -0.20 (< 1950)
       modernisierung: 'Keine Modernisierungen', // -0.18 (< 1970)
       energie: 'Sehr schlecht',   // -0.06
       ausstattung: 'Schlecht',    // -0.05
@@ -227,12 +227,12 @@ function runUnitTests() {
     });
     const result = buildBewertung(input, mockBRW(), mockMarktdaten());
     assert(result !== null, 'Result ist nicht null');
-    assertApprox(result!.faktoren.baujahr, -0.10, 0.001, 'Baujahr = -0.10');
+    assertApprox(result!.faktoren.baujahr, -0.20, 0.001, 'Baujahr = -0.20');
     assertApprox(result!.faktoren.modernisierung, -0.18, 0.001, 'Modernisierung = -0.18');
     assertApprox(result!.faktoren.energie, -0.06, 0.001, 'Energie = -0.06');
     assertApprox(result!.faktoren.ausstattung, -0.05, 0.001, 'Ausstattung = -0.05');
     assertApprox(result!.faktoren.objektunterart, -0.08, 0.001, 'Objektunterart = -0.08');
-    const expectedGesamt = -0.10 + -0.18 + -0.06 + -0.05 + -0.08 + 0 + 0; // neubau=0, stichtag=0
+    const expectedGesamt = -0.20 + -0.18 + -0.06 + -0.05 + -0.08 + 0 + 0; // neubau=0, stichtag=0
     assertApprox(result!.faktoren.gesamt, expectedGesamt, 0.001, `Gesamt = ${expectedGesamt}`);
     console.log(`    → Faktoren: ${JSON.stringify(result!.faktoren)}\n`);
   }
@@ -258,8 +258,14 @@ function runUnitTests() {
     assert(result !== null, 'Result ist nicht null');
     assert(result!.bewertungsmethode === 'vergleichswert', 'Methode = vergleichswert (Wohnung mit Marktdaten)');
     // Basis sollte wohnung_kauf_preis (4500) sein, nicht haus_kauf (3000)
-    const baseWert = 4500 * 80 * (1 + result!.faktoren.gesamt);
-    assertApprox(result!.realistischer_immobilienwert, Math.round(baseWert), 1, 'Nutzt wohnung_kauf_preis als Basis');
+    // Mit Min/Max-Interpolation + Angebotspreis-Abschlag → vergleiche mit haus_kauf Ergebnis
+    const resultHaus = buildBewertung(
+      mockInput({ art: 'Einfamilienhaus', wohnflaeche: 80, grundstuecksflaeche: null }),
+      null,
+      mockMarktdaten({ wohnung_kauf_preis: 4500, haus_kauf_preis: 3000, wohnung_miete_preis: 0, haus_miete_preis: 0 }),
+    );
+    assert(result!.realistischer_immobilienwert > resultHaus!.realistischer_immobilienwert,
+      `Wohnung (${result!.realistischer_immobilienwert}) > Haus (${resultHaus!.realistischer_immobilienwert}) → nutzt wohnung_kauf_preis`);
     console.log(`    → Wert: ${result!.realistischer_immobilienwert}€ (Basis: wohnung_kauf 4500€/m²)\n`);
   }
 
@@ -664,9 +670,9 @@ function runUnitTests() {
     assert(result !== null, 'Result ist nicht null');
     assert(result!.bewertungsmethode === 'vergleichswert', 'Methode = vergleichswert');
     assert(result!.bodenwert === 0, `Bodenwert = 0 (im Vergleichswert enthalten, got ${result!.bodenwert})`);
-    // Wert: 2100 × 54 × (1 + faktoren) — faktoren.baujahr negativ für 1993
-    const expectedBase = 2100 * 54 * (1 + result!.faktoren.gesamt);
-    assertApprox(result!.realistischer_immobilienwert, Math.round(expectedBase), 1, 'Vergleichswert = marktPreis × WF × Faktor');
+    // Wert: 2100 × 0.90 (Abschlag) × 54 × (1 + faktoren) — mit Fallback (median < min → kein Interpolation)
+    const expectedBase = 2100 * 0.90 * 54 * (1 + result!.faktoren.gesamt);
+    assertApprox(result!.realistischer_immobilienwert, Math.round(expectedBase), 1, 'Vergleichswert = marktPreis × Abschlag × WF × Faktor');
     assert(result!.realistischer_immobilienwert > 0, 'Immobilienwert > 0');
     assert(result!.datenquellen.some(d => d.includes('Vergleichswertverfahren')), 'Datenquelle Vergleichswertverfahren');
     assert(result!.hinweise.some(h => h.toLowerCase().includes('vergleichswert') || h.toLowerCase().includes('bodenwertanteil')), 'Hinweis zu Vergleichswert');
