@@ -234,6 +234,30 @@ const ANGEBOTSPREIS_ABSCHLAG = 0.90;
 /** Bundesdurchschnitt qm-Preise (konservativ, Stand 2024/2025) */
 const NATIONAL_AVG_QM_PREIS = { haus: 2200, wohnung: 2800 } as const;
 
+/**
+ * Landesweite Durchschnittspreise €/m² (Stand 2024/2025).
+ * Quellen: Destatis, empirica Preisdatenbank, ImmoScout24 Atlas.
+ * Wird als besserer Fallback statt Bundesdurchschnitt verwendet.
+ */
+const STATE_AVG_QM_PREIS: Record<string, { haus: number; wohnung: number }> = {
+  'Baden-Württemberg':      { haus: 3200, wohnung: 3800 },
+  'Bayern':                 { haus: 3400, wohnung: 4200 },
+  'Berlin':                 { haus: 3800, wohnung: 4500 },
+  'Brandenburg':            { haus: 2000, wohnung: 2400 },
+  'Bremen':                 { haus: 2200, wohnung: 2600 },
+  'Hamburg':                { haus: 4200, wohnung: 5000 },
+  'Hessen':                 { haus: 2800, wohnung: 3200 },
+  'Mecklenburg-Vorpommern': { haus: 1800, wohnung: 2200 },
+  'Niedersachsen':          { haus: 2000, wohnung: 2400 },
+  'Nordrhein-Westfalen':    { haus: 2200, wohnung: 2600 },
+  'Rheinland-Pfalz':        { haus: 2000, wohnung: 2400 },
+  'Saarland':               { haus: 1600, wohnung: 2000 },
+  'Sachsen':                { haus: 2000, wohnung: 2200 },
+  'Sachsen-Anhalt':         { haus: 1400, wohnung: 1800 },
+  'Schleswig-Holstein':     { haus: 2400, wohnung: 2800 },
+  'Thüringen':              { haus: 1600, wohnung: 2000 },
+};
+
 /** Typische Wohnflächen nach Immobilienart (m²) */
 const DEFAULT_WOHNFLAECHE: Record<string, number> = {
   efh: 130, zfh: 160, mfh: 300, etw: 75, dhh: 120, rmh: 110, reh: 115,
@@ -423,6 +447,7 @@ export function buildBewertung(
   preisindex?: PreisindexEntry[] | null,
   irw?: NRWImmobilienrichtwert | null,
   baupreisindex?: BaupreisindexResult | null,
+  bundesland?: string,
 ): Bewertung {
   // ─── Wohnfläche Fallback ────────────────────────────────────────────────────
   const validationHinweise: string[] = [];
@@ -713,15 +738,21 @@ export function buildBewertung(
         hinweise.push('Grundstücksfläche fehlt. Aufteilung in Boden-/Gebäudewert nicht möglich.');
       }
     } else {
-      // ─── Absoluter Fallback: Bundesdurchschnitt ───
-      const avgQmPreis = istHaus ? NATIONAL_AVG_QM_PREIS.haus : NATIONAL_AVG_QM_PREIS.wohnung;
+      // ─── Absoluter Fallback: Landesdurchschnitt → Bundesdurchschnitt ───
+      const stateAvg = bundesland ? STATE_AVG_QM_PREIS[bundesland] : null;
+      const avgQmPreis = stateAvg
+        ? (istHaus ? stateAvg.haus : stateAvg.wohnung)
+        : (istHaus ? NATIONAL_AVG_QM_PREIS.haus : NATIONAL_AVG_QM_PREIS.wohnung);
       const korrigierterQmPreis = avgQmPreis * (1 + faktoren.gesamt);
       realistischerImmobilienwert = Math.round(korrigierterQmPreis * wohnflaeche);
       gebaeudewert = realistischerImmobilienwert; // Ohne BRW → alles als Gebäudewert
 
-      datenquellen.push('Bundesdurchschnitt (Statistisches Bundesamt)');
-      hinweise.push(
-        'Keine lokalen Marktdaten verfügbar. Bewertung basiert auf Bundesdurchschnitt. Abweichungen je nach Lage möglich.',
+      datenquellen.push(stateAvg
+        ? `Landesdurchschnitt ${bundesland}`
+        : 'Bundesdurchschnitt (Statistisches Bundesamt)');
+      hinweise.push(stateAvg
+        ? `Keine lokalen Marktdaten verfügbar. Bewertung basiert auf Landesdurchschnitt ${bundesland}. Lage-spezifische Abweichungen möglich.`
+        : 'Keine lokalen Marktdaten verfügbar. Bewertung basiert auf Bundesdurchschnitt. Abweichungen je nach Lage möglich.',
       );
     }
   }

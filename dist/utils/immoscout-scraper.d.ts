@@ -39,6 +39,12 @@ export interface ImmoScoutPrices {
  */
 export declare function slugify(name: string): string;
 /**
+ * ASCII-only Slug für IS24 Mobile API Geocode-Pfade.
+ * Die Mobile API verwendet teils ASCII-Slugs (ü→ue, ö→oe, ä→ae, ß→ss)
+ * statt Unicode wie der Atlas.
+ */
+export declare function slugifyAscii(name: string): string;
+/**
  * Scrapt ImmoScout Atlas für eine Stadt und gibt Preisdaten zurück.
  *
  * @param bundeslandSlug - z.B. "bayern", "baden-wuerttemberg"

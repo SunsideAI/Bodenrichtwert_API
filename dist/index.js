@@ -72,6 +72,14 @@ async function fetchMarktdaten(state, city, county) {
                 immoCache.set(kreisCacheKey, kreisPrices);
                 return kreisPrices;
             }
+            // "landkreis-{name}" Format versuchen (einige Atlas-Seiten nutzen dieses Format)
+            const landkreisSlug = `landkreis-${kreisSlug}`;
+            console.log(`ImmoScout: Landkreis "${kreisname}" nicht gefunden, versuche "${landkreisSlug}"...`);
+            const landkreisPrices = await scrapeImmoScoutAtlas(bundeslandSlug, landkreisSlug);
+            if (landkreisPrices) {
+                immoCache.set(kreisCacheKey, landkreisPrices);
+                return landkreisPrices;
+            }
         }
     }
     // 4. IS24-Suche als letzter Fallback (individuelle Listings parsen)
@@ -219,7 +227,7 @@ function mapArtToTeilmarkt(art) {
     // Default für Einfamilienhaus, Zweifamilienhaus etc.
     return 'EFH';
 }
-function buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, baupreisindex) {
+function buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, baupreisindex, bundesland) {
     return buildBewertung({
         art: body.art || null,
         grundstuecksflaeche: parseNum(body.grundstuecksflaeche),
@@ -229,7 +237,7 @@ function buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, baupr
         modernisierung: body.modernisierung || null,
         energie: body.energie || null,
         ausstattung: body.ausstattung || null,
-    }, brw, marktdaten, preisindex, irw, baupreisindex);
+    }, brw, marktdaten, preisindex, irw, baupreisindex, bundesland);
 }
 // ==========================================
 // POST /api/enrich — Hauptendpunkt für Zapier
@@ -300,7 +308,7 @@ app.post('/api/enrich', async (c) => {
                 bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') },
                 marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
                 erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
-                bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi),
+                bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi, geo.state),
                 meta: { cached: true, response_time_ms: elapsed },
             });
         }
@@ -324,7 +332,7 @@ app.post('/api/enrich', async (c) => {
                 },
                 marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
                 erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-                bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi),
+                bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state),
                 meta: { cached: false, response_time_ms: elapsed },
             });
         }
@@ -349,7 +357,7 @@ app.post('/api/enrich', async (c) => {
                 },
                 marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
                 erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-                bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi),
+                bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state),
                 meta: { cached: false, response_time_ms: elapsed },
             });
         }
@@ -364,7 +372,7 @@ app.post('/api/enrich', async (c) => {
             bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') },
             marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
             erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
-            bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi),
+            bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi, geo.state),
             meta: { cached: false, response_time_ms: elapsed },
         });
     }

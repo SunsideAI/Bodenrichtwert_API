@@ -60,4 +60,4 @@ export interface Bewertung {
     hinweise: string[];
     datenquellen: string[];
 }
-export declare function buildBewertung(input: BewertungInput, brw: NormalizedBRW | null, marktdaten: ImmoScoutPrices | null, preisindex?: PreisindexEntry[] | null, irw?: NRWImmobilienrichtwert | null, baupreisindex?: BaupreisindexResult | null): Bewertung;
+export declare function buildBewertung(input: BewertungInput, brw: NormalizedBRW | null, marktdaten: ImmoScoutPrices | null, preisindex?: PreisindexEntry[] | null, irw?: NRWImmobilienrichtwert | null, baupreisindex?: BaupreisindexResult | null, bundesland?: string): Bewertung;

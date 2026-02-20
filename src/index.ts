@@ -93,6 +93,15 @@ async function fetchMarktdaten(
         immoCache.set(kreisCacheKey, kreisPrices);
         return kreisPrices;
       }
+
+      // "landkreis-{name}" Format versuchen (einige Atlas-Seiten nutzen dieses Format)
+      const landkreisSlug = `landkreis-${kreisSlug}`;
+      console.log(`ImmoScout: Landkreis "${kreisname}" nicht gefunden, versuche "${landkreisSlug}"...`);
+      const landkreisPrices = await scrapeImmoScoutAtlas(bundeslandSlug, landkreisSlug);
+      if (landkreisPrices) {
+        immoCache.set(kreisCacheKey, landkreisPrices);
+        return landkreisPrices;
+      }
     }
   }
 
@@ -270,6 +279,7 @@ function buildBewertungFromContext(
   preisindex?: PreisindexEntry[] | null,
   irw?: NRWImmobilienrichtwert | null,
   baupreisindex?: BaupreisindexResult | null,
+  bundesland?: string,
 ): Bewertung {
   return buildBewertung(
     {
@@ -287,6 +297,7 @@ function buildBewertungFromContext(
     preisindex,
     irw,
     baupreisindex,
+    bundesland,
   );
 }
 
@@ -373,7 +384,7 @@ app.post('/api/enrich', async (c) => {
         bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') as string },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi),
+        bewertung: buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi, geo.state),
         meta: { cached: true, response_time_ms: elapsed },
       });
     }
@@ -399,7 +410,7 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi),
+        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -426,7 +437,7 @@ app.post('/api/enrich', async (c) => {
         },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
-        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi),
+        bewertung: buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state),
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -443,7 +454,7 @@ app.post('/api/enrich', async (c) => {
       bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
       marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
-      bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi),
+      bewertung: buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi, geo.state),
       meta: { cached: false, response_time_ms: elapsed },
     });
 

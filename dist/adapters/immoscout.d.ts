@@ -23,7 +23,7 @@ export declare class ImmoScoutAdapter implements BodenrichtwertAdapter {
     constructor(state: 'Bayern' | 'Baden-Württemberg');
     getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null>;
     /**
-     * Reverse-Geocode via Nominatim: lat/lon → Stadt + Slugs
+     * Reverse-Geocode via Nominatim: lat/lon → Stadt + Landkreis + Slugs
      */
     private reverseGeocode;
     /**
