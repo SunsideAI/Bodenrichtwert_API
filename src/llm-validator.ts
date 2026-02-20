@@ -291,6 +291,93 @@ export async function validateBewertung(
   }
 }
 
+// ─── Auto-Korrektur ─────────────────────────────────────────────────────────
+
+/**
+ * Wendet die LLM-Validierung als Korrektur auf die Bewertung an.
+ *
+ * Korrektur-Logik (graduiert, nicht blind übernehmen):
+ *   - plausibel / fehler / deaktiviert → keine Änderung
+ *   - auffaellig (10-25%) + confidence ≥ 0.7 + empfohlener_wert → 30% Blend
+ *   - unplausibel (>25%) + confidence ≥ 0.75 + empfohlener_wert → 50% Blend
+ *
+ * Gibt eine korrigierte Kopie zurück (Original bleibt unverändert).
+ */
+export function applyLLMCorrection(
+  bewertung: Bewertung,
+  validation: ValidationResult,
+): Bewertung {
+  // Kein empfohlener Wert → nichts zu korrigieren
+  if (validation.empfohlener_wert == null || validation.empfohlener_wert <= 0) {
+    return bewertung;
+  }
+
+  // Nur bei auffällig/unplausibel korrigieren
+  if (validation.status !== 'auffaellig' && validation.status !== 'unplausibel') {
+    return bewertung;
+  }
+
+  // Confidence-Schwelle prüfen
+  const minConfidence = validation.status === 'unplausibel' ? 0.75 : 0.70;
+  if (validation.confidence < minConfidence) {
+    return bewertung;
+  }
+
+  // Blend-Stärke: wie stark ziehen wir zum LLM-Wert?
+  const blendWeight = validation.status === 'unplausibel' ? 0.50 : 0.30;
+
+  const originalWert = bewertung.realistischer_immobilienwert;
+  const llmWert = validation.empfohlener_wert;
+
+  // Sanity-Check: LLM-Wert muss zwischen 20% und 500% des Originals liegen
+  const ratio = llmWert / originalWert;
+  if (ratio < 0.20 || ratio > 5.0) {
+    return bewertung;
+  }
+
+  // Graduierter Blend
+  const korrigierterWert = Math.round(
+    originalWert * (1 - blendWeight) + llmWert * blendWeight,
+  );
+  const wohnflaeche = bewertung.realistischer_qm_preis > 0
+    ? bewertung.realistischer_immobilienwert / bewertung.realistischer_qm_preis
+    : 1;
+  const korrigierterQmPreis = Math.round(korrigierterWert / wohnflaeche);
+
+  // Spanne neu berechnen (gleichen Spread beibehalten)
+  const originalSpread = bewertung.immobilienwert_spanne.max > 0
+    ? (bewertung.immobilienwert_spanne.max - bewertung.realistischer_immobilienwert)
+      / bewertung.realistischer_immobilienwert
+    : 0.15;
+
+  const abweichungPct = Math.round(((korrigierterWert - originalWert) / originalWert) * 100);
+  const richtung = abweichungPct > 0 ? 'angehoben' : 'reduziert';
+
+  return {
+    ...bewertung,
+    realistischer_immobilienwert: korrigierterWert,
+    realistischer_qm_preis: korrigierterQmPreis,
+    immobilienwert_spanne: {
+      min: Math.round(korrigierterWert * (1 - originalSpread)),
+      max: Math.round(korrigierterWert * (1 + originalSpread)),
+    },
+    qm_preis_spanne: {
+      min: Math.round(korrigierterQmPreis * (1 - originalSpread)),
+      max: Math.round(korrigierterQmPreis * (1 + originalSpread)),
+    },
+    hinweise: [
+      ...bewertung.hinweise,
+      `KI-Korrektur (${validation.status}): Wert um ${Math.abs(abweichungPct)}% ${richtung} `
+      + `(${originalWert.toLocaleString('de-DE')} → ${korrigierterWert.toLocaleString('de-DE')} €, `
+      + `Blend ${Math.round(blendWeight * 100)}% LLM-Empfehlung, Confidence ${(validation.confidence * 100).toFixed(0)}%).`,
+    ],
+    datenquellen: [
+      ...bewertung.datenquellen,
+      `KI-Validierung (${validation.modell})`,
+    ],
+  };
+}
+
 // ─── Cache-Management ───────────────────────────────────────────────────────
 
 export function clearValidationCache(): number {

@@ -9,7 +9,7 @@ import { cache, immoCache } from './cache.js';
 import { buildEnrichment } from './enrichment.js';
 import { buildBewertung } from './bewertung.js';
 import type { Bewertung, BewertungInput } from './bewertung.js';
-import { validateBewertung, clearValidationCache, validationCacheStats } from './llm-validator.js';
+import { validateBewertung, applyLLMCorrection, clearValidationCache, validationCacheStats } from './llm-validator.js';
 import type { ValidationResult } from './llm-validator.js';
 import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify, normalizeCityForIS24, generateCitySlugVariants } from './utils/immoscout-scraper.js';
 import type { ImmoScoutPrices } from './utils/immoscout-scraper.js';
@@ -401,8 +401,9 @@ app.post('/api/enrich', async (c) => {
       const [marktdaten, preisindex, irw, bpi] = await Promise.all([
         marktdatenPromise, preisindexPromise, irwPromise, baupreisindexPromise,
       ]);
-      const bewertung = buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi, geo.state);
-      const validation = await validateBewertung(bewertungInput, bewertung, cached, adressString, geo.state);
+      const rawBewertung = buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi, geo.state);
+      const validation = await validateBewertung(bewertungInput, rawBewertung, cached, adressString, geo.state);
+      const bewertung = applyLLMCorrection(rawBewertung, validation);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'success',
@@ -423,8 +424,9 @@ app.post('/api/enrich', async (c) => {
       const [marktdaten, preisindex, irw, bpi] = await Promise.all([
         marktdatenPromise, preisindexPromise, irwPromise, baupreisindexPromise,
       ]);
-      const bewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
-      const validation = await validateBewertung(bewertungInput, bewertung, null, adressString, geo.state);
+      const rawBewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
+      const validation = await validateBewertung(bewertungInput, rawBewertung, null, adressString, geo.state);
+      const bewertung = applyLLMCorrection(rawBewertung, validation);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'manual_required',
@@ -456,8 +458,9 @@ app.post('/api/enrich', async (c) => {
     const elapsed = Date.now() - start;
 
     if (!brw) {
-      const bewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
-      const validation = await validateBewertung(bewertungInput, bewertung, null, adressString, geo.state);
+      const rawBewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
+      const validation = await validateBewertung(bewertungInput, rawBewertung, null, adressString, geo.state);
+      const bewertung = applyLLMCorrection(rawBewertung, validation);
       return c.json({
         status: 'not_found',
         input_echo: inputEcho,
@@ -480,9 +483,10 @@ app.post('/api/enrich', async (c) => {
       cache.set(cacheKey, brw);
     }
 
-    // 7. Bewertung + LLM-Validierung
-    const bewertung = buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi, geo.state);
-    const validation = await validateBewertung(bewertungInput, bewertung, brw, adressString, geo.state);
+    // 7. Bewertung + LLM-Validierung + Auto-Korrektur
+    const rawBewertung = buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi, geo.state);
+    const validation = await validateBewertung(bewertungInput, rawBewertung, brw, adressString, geo.state);
+    const bewertung = applyLLMCorrection(rawBewertung, validation);
 
     return c.json({
       status: 'success',
