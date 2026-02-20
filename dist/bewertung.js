@@ -625,35 +625,75 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
             datenquellen.push('BORIS/WFS Bodenrichtwert');
     }
     else if (bewertungsmethode === 'sachwert-lite') {
-        // ─── Sachwert-lite: BRW + Grundstück + Marktdaten (für Häuser) ───
+        // ─── Sachwert-lite: BRW + NHK + Marktdaten-Blend (für Häuser) ───
+        //
+        // Kernprinzip: NHK (Sachwertverfahren, ImmoWertV § 35) IMMER berechnen.
+        // IS24-Marktdaten dienen als Kalibrierung, gewichtet nach Datengranularität.
+        //
+        // Gewichtung IS24 vs NHK:
+        //   Stadtteil-Daten (hohe Auflösung):    60% IS24 / 40% NHK
+        //   Stadt-Daten (Durchschnitt):           40% IS24 / 60% NHK
+        //   Kein IS24 / VVG/Landkreis-Daten:      0% IS24 / 100% NHK
+        //   Bei starker Divergenz (>40%): NHK-Gewicht +10pp (max 80%)
         const brwKorrigiert = brw.wert * (1 + faktoren.stichtag_korrektur);
         bodenwert = Math.round(brwKorrigiert * grundflaeche);
+        // NHK IMMER berechnen (Sachwertverfahren ist primäre Methode für EFH lt. ImmoWertV)
+        const externalBpi = baupreisindex ? {
+            aktuell: baupreisindex.aktuell,
+            basis_2010: baupreisindex.basis_2010,
+            stand: baupreisindex.stand,
+            quelle: baupreisindex.quelle,
+        } : null;
+        const nhk = calcGebaeudewertNHK(wohnflaeche, input.baujahr, input.objektunterart, input.ausstattung, input.modernisierung, istHaus, brw.wert, externalBpi, bundesland);
+        const nhkSachwert = bodenwert + nhk.gebaeudewert;
+        datenquellen.push('BORIS/WFS Bodenrichtwert', 'NHK 2010 (ImmoWertV 2022)');
+        if (baupreisindex?.quelle === 'Destatis Genesis 61261-0002') {
+            datenquellen.push('Destatis Baupreisindex');
+        }
         if (marktPreisProQm) {
+            // IS24-basierten Vergleichswert berechnen
             const adjustedQmPreisSachwert = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt, angebotspreisAbschlag);
-            const marktGesamt = adjustedQmPreisSachwert * wohnflaeche;
-            gebaeudewert = Math.round(Math.max(0, marktGesamt - bodenwert));
-            if (marktGesamt - bodenwert < 0) {
+            const is24Gesamtwert = Math.round(adjustedQmPreisSachwert * wohnflaeche);
+            // Gewichtung nach Datengranularität
+            const hatStadtteil = !!marktdaten?.stadtteil;
+            let nhkWeight = hatStadtteil ? 0.40 : 0.60;
+            // Divergenz-Prüfung: bei starker Abweichung NHK stärker gewichten
+            const divergenz = Math.abs(nhkSachwert - is24Gesamtwert) / Math.max(nhkSachwert, is24Gesamtwert);
+            if (divergenz > 0.40) {
+                nhkWeight = Math.min(0.80, nhkWeight + 0.10);
+                hinweise.push(`IS24-Marktpreis (${is24Gesamtwert.toLocaleString('de-DE')} €) weicht ${Math.round(divergenz * 100)}% vom NHK-Sachwert (${nhkSachwert.toLocaleString('de-DE')} €) ab. NHK-Gewichtung erhöht.`);
+            }
+            // Blend
+            realistischerImmobilienwert = Math.round(is24Gesamtwert * (1 - nhkWeight) + nhkSachwert * nhkWeight);
+            gebaeudewert = Math.round(Math.max(0, realistischerImmobilienwert - bodenwert));
+            datenquellen.push('ImmoScout24 Atlas Marktpreise');
+            hinweise.push(`Sachwert-Blend: ${Math.round(nhkWeight * 100)}% NHK (${nhkSachwert.toLocaleString('de-DE')} €) / ${Math.round((1 - nhkWeight) * 100)}% Markt (${is24Gesamtwert.toLocaleString('de-DE')} €)${hatStadtteil ? ' [Stadtteil-Daten]' : ' [Stadt-Durchschnitt]'}.`);
+            if (is24Gesamtwert - bodenwert < 0) {
                 hinweise.push('Bodenwert übersteigt Marktindikation. Grundstücksanteil dominiert den Gesamtwert.');
             }
-            datenquellen.push('BORIS/WFS Bodenrichtwert', 'ImmoScout24 Atlas Marktpreise');
         }
         else {
-            // Kein Marktpreis: Gebäudewert über NHK 2010 berechnen (ImmoWertV Anlage 4 + MAF)
-            const externalBpi = baupreisindex ? {
-                aktuell: baupreisindex.aktuell,
-                basis_2010: baupreisindex.basis_2010,
-                stand: baupreisindex.stand,
-                quelle: baupreisindex.quelle,
-            } : null;
-            const nhk = calcGebaeudewertNHK(wohnflaeche, input.baujahr, input.objektunterart, input.ausstattung, input.modernisierung, istHaus, brw.wert, externalBpi, bundesland);
+            // Kein Marktpreis: NHK-Sachwert verwenden, mit Landesdurchschnitt als Cross-Check
             gebaeudewert = nhk.gebaeudewert;
-            datenquellen.push('BORIS/WFS Bodenrichtwert', 'NHK 2010 (ImmoWertV 2022)');
-            if (baupreisindex?.quelle === 'Destatis Genesis 61261-0002') {
-                datenquellen.push('Destatis Baupreisindex');
-            }
+            realistischerImmobilienwert = nhkSachwert;
             hinweise.push(...nhk.hinweise);
+            // Landesdurchschnitt als schwaches Kalibrierungssignal (30% Gewicht)
+            // NHK allein tendiert zur Unterschätzung, da NHK 2010-Basiswerte konservativ sind.
+            if (bundesland && wohnflaeche > 0) {
+                const stateAvg = STATE_AVG_QM_PREIS[bundesland];
+                if (stateAvg) {
+                    const ref = istHaus ? stateAvg.haus : stateAvg.wohnung;
+                    const stateRefWert = ref * wohnflaeche * (1 + faktoren.gesamt);
+                    if (stateRefWert > nhkSachwert * 1.10) {
+                        // NHK deutlich unter Landesdurchschnitt: 70% NHK / 30% Landesdurchschnitt
+                        realistischerImmobilienwert = Math.round(nhkSachwert * 0.70 + stateRefWert * 0.30);
+                        gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+                        datenquellen.push(`Landesdurchschnitt ${bundesland}`);
+                        hinweise.push(`NHK-Sachwert (${nhkSachwert.toLocaleString('de-DE')} €) liegt unter Landesdurchschnitt. Blend: 70% NHK / 30% Landesdurchschnitt (${Math.round(stateRefWert).toLocaleString('de-DE')} €).`);
+                    }
+                }
+            }
         }
-        realistischerImmobilienwert = bodenwert + gebaeudewert;
         if (faktoren.stichtag_korrektur !== 0) {
             const vorzeichen = faktoren.stichtag_korrektur > 0 ? '+' : '';
             const quelle = preisindex && preisindex.length > 0
@@ -785,6 +825,116 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
     }
     else if (marktdaten) {
         hinweise.push(`Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas, ${Math.round((1 - angebotspreisAbschlag) * 100)}% Angebotspreis-Abschlag). Lage-spezifische Abweichungen möglich.`);
+    }
+    // ─── Plausibilitätsprüfung + Auto-Korrektur ───────────────────────────────
+    //
+    // Iterative Validierungsschleife: prüft multiple Plausibilitätssignale und
+    // korrigiert den Wert automatisch wenn nötig. Maximal 3 Iterationen.
+    //
+    // Signale:
+    //   1. Gebäudewert/m² plausibel? (NHK-Kennwert-Bereich)
+    //   2. Ertragswert als Cross-Check (wenn verfügbar)
+    //   3. BRW-Bodenwertanteil plausibel? (nicht >70% für EFH, nicht >90% für ETW)
+    //   4. Gesamt-qm-Preis im Landesrahmen? (±80% vom Landesdurchschnitt)
+    let korrekturAngewandt = false;
+    for (let iteration = 0; iteration < 3; iteration++) {
+        let needsCorrection = false;
+        // Signal 1: Gebäudewert/m² im plausiblen Bereich?
+        // NHK 2010 Stufe 1-5: ~490-1260 €/m² BGF × BPI ≈ 910-2340 €/m² BGF aktuell
+        // → Gebäudewert/m² Wohnfläche: ~650-3200 (mit BGF-Faktor und AWM)
+        if (istHaus && gebaeudewert > 0 && wohnflaeche > 0) {
+            const gebWertProQm = gebaeudewert / wohnflaeche;
+            const maxPlausibel = 4000; // Stark gehobener Neubau
+            if (gebWertProQm > maxPlausibel) {
+                const korrektur = maxPlausibel * wohnflaeche;
+                hinweise.push(`Plausibilitätskorrektur: Gebäudewert/m² (${Math.round(gebWertProQm)} €) übersteigt Maximum (${maxPlausibel} €/m²). Korrigiert.`);
+                gebaeudewert = Math.round(korrektur);
+                realistischerImmobilienwert = bodenwert + gebaeudewert;
+                needsCorrection = true;
+            }
+        }
+        // Signal 2: Ertragswert-Abgleich (stärkste Cross-Validation)
+        // Wenn Ertragswert verfügbar und Abweichung >35%, Wert in Richtung Ertragswert ziehen
+        if (ertragswertErgebnis && ertragswertErgebnis > 0) {
+            const ewAbweichung = (realistischerImmobilienwert - ertragswertErgebnis) / ertragswertErgebnis;
+            if (Math.abs(ewAbweichung) > 0.35) {
+                // Korrektur: 30% in Richtung Ertragswert ziehen
+                const korrigiert = Math.round(realistischerImmobilienwert * 0.70 + ertragswertErgebnis * 0.30);
+                hinweise.push(`Plausibilitätskorrektur: Sachwert weicht ${Math.round(ewAbweichung * 100)}% vom Ertragswert ab. Wert um ${Math.round(Math.abs(korrigiert - realistischerImmobilienwert) / 1000)}T€ korrigiert.`);
+                realistischerImmobilienwert = korrigiert;
+                gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+                needsCorrection = true;
+            }
+        }
+        // Signal 3: Bodenwertanteil plausibel?
+        if (istHaus && realistischerImmobilienwert > 0 && bodenwert > 0) {
+            const bodenwertAnteil = bodenwert / realistischerImmobilienwert;
+            if (bodenwertAnteil > 0.70) {
+                // Grundstück dominiert → Gebäudewert zu niedrig oder BRW zu hoch
+                // Korrektur: Gesamtwert auf min. Bodenwert × 1.5 anheben (Gebäude hat Wert)
+                const minGesamt = Math.round(bodenwert * 1.5);
+                if (realistischerImmobilienwert < minGesamt) {
+                    hinweise.push(`Plausibilitätskorrektur: Bodenwertanteil (${Math.round(bodenwertAnteil * 100)}%) zu hoch für bebautes Grundstück. Gesamtwert angehoben.`);
+                    realistischerImmobilienwert = minGesamt;
+                    gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+                    needsCorrection = true;
+                }
+            }
+        }
+        // Signal 4: qm-Preis im Landesrahmen?
+        if (bundesland && realistischerImmobilienwert > 0 && wohnflaeche > 0) {
+            const qmAktuell = realistischerImmobilienwert / wohnflaeche;
+            const stateAvg = STATE_AVG_QM_PREIS[bundesland];
+            if (stateAvg) {
+                const ref = istHaus ? stateAvg.haus : stateAvg.wohnung;
+                const untergrenze = ref * 0.20; // Absolutes Minimum
+                const obergrenze = ref * 3.00; // Absolutes Maximum (Spitzenlagen)
+                if (qmAktuell < untergrenze) {
+                    realistischerImmobilienwert = Math.round(untergrenze * wohnflaeche);
+                    gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+                    hinweise.push(`Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) unter Minimum für ${bundesland}. Auf ${Math.round(untergrenze)} €/m² angehoben.`);
+                    needsCorrection = true;
+                }
+                else if (qmAktuell > obergrenze) {
+                    realistischerImmobilienwert = Math.round(obergrenze * wohnflaeche);
+                    gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+                    hinweise.push(`Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) über Maximum für ${bundesland}. Auf ${Math.round(obergrenze)} €/m² reduziert.`);
+                    needsCorrection = true;
+                }
+            }
+        }
+        if (needsCorrection) {
+            korrekturAngewandt = true;
+        }
+        else {
+            break; // Keine weitere Korrektur nötig
+        }
+    }
+    // Nach Korrekturen: qm-Preis und Spanne neu berechnen
+    if (korrekturAngewandt) {
+        const newQmPreis = Math.round(realistischerImmobilienwert / wohnflaeche);
+        const newSpanne = {
+            min: Math.round(realistischerImmobilienwert * (1 - spread)),
+            max: Math.round(realistischerImmobilienwert * (1 + spread)),
+        };
+        datenquellen.push('Plausibilitätsprüfung (Auto-Korrektur)');
+        return {
+            realistischer_qm_preis: newQmPreis,
+            qm_preis_spanne: {
+                min: Math.round(newQmPreis * (1 - spread)),
+                max: Math.round(newQmPreis * (1 + spread)),
+            },
+            realistischer_immobilienwert: realistischerImmobilienwert,
+            immobilienwert_spanne: newSpanne,
+            bodenwert,
+            gebaeudewert,
+            ertragswert: ertragswertErgebnis,
+            bewertungsmethode,
+            konfidenz,
+            faktoren,
+            hinweise,
+            datenquellen: [...new Set(datenquellen)],
+        };
     }
     return {
         realistischer_qm_preis: realistischerQmPreis,
