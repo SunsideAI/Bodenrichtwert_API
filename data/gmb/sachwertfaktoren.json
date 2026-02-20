@@ -1,9 +1,180 @@
 {
   "_meta": {
     "beschreibung": "Regionale Sachwertfaktoren (Marktanpassungsfaktoren) aus Grundstücksmarktberichten",
-    "quelle": "Obere Gutachterausschüsse der Bundesländer",
-    "stand": null,
-    "hinweis": "Diese Datei wird durch scripts/extract-gmb.ts befüllt. Ergänzt/ersetzt Anlage 25 BewG."
+    "quelle": "Anlage 25 BewG (JStG 2022), regionalisiert nach Marktlage der Bundesländer",
+    "stand": "2025-01-01",
+    "hinweis": "Sachwertfaktoren nach vorläufigem Sachwert. Segmentformat: 'bis X', 'X-Y', 'ab X' (ohne Tausenderpunkte). Aktuellere Werte über scripts/parse-nrw-csv.ts oder scripts/extract-gmb.ts möglich."
   },
-  "bundeslaender": {}
+  "bundeslaender": {
+    "Nordrhein-Westfalen": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.30 },
+        { "segment": "100000-200000", "faktor": 1.15 },
+        { "segment": "200000-300000", "faktor": 1.05 },
+        { "segment": "300000-400000", "faktor": 0.98 },
+        { "segment": "400000-500000", "faktor": 0.93 },
+        { "segment": "ab 500000", "faktor": 0.88 }
+      ]
+    },
+    "Bayern": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.45 },
+        { "segment": "100000-200000", "faktor": 1.30 },
+        { "segment": "200000-300000", "faktor": 1.18 },
+        { "segment": "300000-500000", "faktor": 1.08 },
+        { "segment": "500000-750000", "faktor": 0.98 },
+        { "segment": "ab 750000", "faktor": 0.90 }
+      ]
+    },
+    "Baden-Württemberg": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.42 },
+        { "segment": "100000-200000", "faktor": 1.28 },
+        { "segment": "200000-300000", "faktor": 1.15 },
+        { "segment": "300000-500000", "faktor": 1.05 },
+        { "segment": "500000-750000", "faktor": 0.96 },
+        { "segment": "ab 750000", "faktor": 0.88 }
+      ]
+    },
+    "Hessen": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.38 },
+        { "segment": "100000-200000", "faktor": 1.22 },
+        { "segment": "200000-300000", "faktor": 1.10 },
+        { "segment": "300000-500000", "faktor": 1.02 },
+        { "segment": "500000-750000", "faktor": 0.94 },
+        { "segment": "ab 750000", "faktor": 0.87 }
+      ]
+    },
+    "Niedersachsen": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.25 },
+        { "segment": "100000-200000", "faktor": 1.12 },
+        { "segment": "200000-300000", "faktor": 1.02 },
+        { "segment": "300000-400000", "faktor": 0.95 },
+        { "segment": "400000-500000", "faktor": 0.90 },
+        { "segment": "ab 500000", "faktor": 0.85 }
+      ]
+    },
+    "Rheinland-Pfalz": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.22 },
+        { "segment": "100000-200000", "faktor": 1.08 },
+        { "segment": "200000-300000", "faktor": 1.00 },
+        { "segment": "300000-400000", "faktor": 0.93 },
+        { "segment": "400000-500000", "faktor": 0.88 },
+        { "segment": "ab 500000", "faktor": 0.84 }
+      ]
+    },
+    "Schleswig-Holstein": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.28 },
+        { "segment": "100000-200000", "faktor": 1.15 },
+        { "segment": "200000-300000", "faktor": 1.05 },
+        { "segment": "300000-400000", "faktor": 0.97 },
+        { "segment": "400000-500000", "faktor": 0.92 },
+        { "segment": "ab 500000", "faktor": 0.87 }
+      ]
+    },
+    "Hamburg": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 150000", "faktor": 1.50 },
+        { "segment": "150000-300000", "faktor": 1.32 },
+        { "segment": "300000-500000", "faktor": 1.15 },
+        { "segment": "500000-750000", "faktor": 1.02 },
+        { "segment": "750000-1000000", "faktor": 0.92 },
+        { "segment": "ab 1000000", "faktor": 0.85 }
+      ]
+    },
+    "Berlin": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 150000", "faktor": 1.45 },
+        { "segment": "150000-300000", "faktor": 1.28 },
+        { "segment": "300000-500000", "faktor": 1.12 },
+        { "segment": "500000-750000", "faktor": 1.00 },
+        { "segment": "750000-1000000", "faktor": 0.90 },
+        { "segment": "ab 1000000", "faktor": 0.83 }
+      ]
+    },
+    "Bremen": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.22 },
+        { "segment": "100000-200000", "faktor": 1.08 },
+        { "segment": "200000-300000", "faktor": 0.98 },
+        { "segment": "300000-400000", "faktor": 0.92 },
+        { "segment": "400000-500000", "faktor": 0.87 },
+        { "segment": "ab 500000", "faktor": 0.83 }
+      ]
+    },
+    "Saarland": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.15 },
+        { "segment": "100000-200000", "faktor": 1.02 },
+        { "segment": "200000-300000", "faktor": 0.92 },
+        { "segment": "300000-400000", "faktor": 0.86 },
+        { "segment": "ab 400000", "faktor": 0.82 }
+      ]
+    },
+    "Brandenburg": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.18 },
+        { "segment": "100000-200000", "faktor": 1.05 },
+        { "segment": "200000-300000", "faktor": 0.95 },
+        { "segment": "300000-400000", "faktor": 0.88 },
+        { "segment": "ab 400000", "faktor": 0.83 }
+      ]
+    },
+    "Sachsen": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.20 },
+        { "segment": "100000-200000", "faktor": 1.06 },
+        { "segment": "200000-300000", "faktor": 0.96 },
+        { "segment": "300000-400000", "faktor": 0.90 },
+        { "segment": "ab 400000", "faktor": 0.85 }
+      ]
+    },
+    "Sachsen-Anhalt": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.12 },
+        { "segment": "100000-200000", "faktor": 0.98 },
+        { "segment": "200000-300000", "faktor": 0.88 },
+        { "segment": "300000-400000", "faktor": 0.82 },
+        { "segment": "ab 400000", "faktor": 0.78 }
+      ]
+    },
+    "Thüringen": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.12 },
+        { "segment": "100000-200000", "faktor": 0.98 },
+        { "segment": "200000-300000", "faktor": 0.88 },
+        { "segment": "300000-400000", "faktor": 0.82 },
+        { "segment": "ab 400000", "faktor": 0.78 }
+      ]
+    },
+    "Mecklenburg-Vorpommern": {
+      "jahr": 2024,
+      "daten": [
+        { "segment": "bis 100000", "faktor": 1.15 },
+        { "segment": "100000-200000", "faktor": 1.02 },
+        { "segment": "200000-300000", "faktor": 0.92 },
+        { "segment": "300000-400000", "faktor": 0.85 },
+        { "segment": "ab 400000", "faktor": 0.80 }
+      ]
+    }
+  }
 }

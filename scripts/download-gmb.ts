@@ -54,22 +54,16 @@ const SOURCES: DownloadSource[] = [
     beschreibung: 'OGA Bayern Immobilienmarktbericht 2024',
     dateiname: 'gmb-bayern-2024.pdf',
   },
-  // ── NRW (Open Data — CSV mit Liegenschaftszinssätzen) ─────────────────
+  // ── NRW (Open Data — Grundstücksmarktdaten als CSV-ZIP) ─────────────
+  // Enthält Liegenschaftszinssätze, Sachwertfaktoren, BRW-Durchschnitte
+  // Datenlizenz Deutschland – Zero – Version 2.0
   {
     bundesland: 'Nordrhein-Westfalen',
     slug: 'nrw',
-    url: 'https://www.opengeodata.nrw.de/produkte/kataster_und_vermessung/grundstuecksmarktdaten/liegenschaftszinssaetze/LiZi_NRW.csv',
+    url: 'https://www.opengeodata.nrw.de/produkte/infrastruktur_bauen_wohnen/boris/GMD/GMDNRW_2024_CSV.zip',
     typ: 'csv',
-    beschreibung: 'NRW Liegenschaftszinssätze (Open Data CSV)',
-    dateiname: 'nrw-liegenschaftszins.csv',
-  },
-  {
-    bundesland: 'Nordrhein-Westfalen',
-    slug: 'nrw',
-    url: 'https://www.opengeodata.nrw.de/produkte/kataster_und_vermessung/grundstuecksmarktdaten/sachwertfaktoren/SWF_NRW.csv',
-    typ: 'csv',
-    beschreibung: 'NRW Sachwertfaktoren (Open Data CSV)',
-    dateiname: 'nrw-sachwertfaktoren.csv',
+    beschreibung: 'NRW Grundstücksmarktdaten 2024 (Open Data CSV-ZIP)',
+    dateiname: 'GMDNRW_2024_CSV.zip',
   },
   // ── Rheinland-Pfalz ──────────────────────────────────────────────────
   {

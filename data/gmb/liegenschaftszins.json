@@ -1,9 +1,154 @@
 {
   "_meta": {
     "beschreibung": "Regionale Liegenschaftszinssätze aus Grundstücksmarktberichten",
-    "quelle": "Obere Gutachterausschüsse der Bundesländer",
-    "stand": null,
-    "hinweis": "Diese Datei wird durch scripts/extract-gmb.ts befüllt. Manuelle Einträge möglich."
+    "quelle": "§ 256 BewG, IVD-Zinsspannen (Stand 01/2024), Obere Gutachterausschüsse",
+    "stand": "2025-01-01",
+    "hinweis": "Durchschnittswerte pro Bundesland. Innerhalb jedes Bundeslandes wird der Zinssatz BRW-abhängig interpoliert (src/utils/ertragswert.ts). Aktuellere Werte über scripts/parse-nrw-csv.ts oder scripts/extract-gmb.ts möglich."
   },
-  "bundeslaender": {}
+  "bundeslaender": {
+    "Nordrhein-Westfalen": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.022, "min": 0.015, "max": 0.035 },
+        { "teilmarkt": "zfh", "zins": 0.027, "min": 0.020, "max": 0.040 },
+        { "teilmarkt": "etw", "zins": 0.030, "min": 0.020, "max": 0.045 },
+        { "teilmarkt": "mfh", "zins": 0.042, "min": 0.030, "max": 0.060 }
+      ]
+    },
+    "Bayern": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.018, "min": 0.012, "max": 0.030 },
+        { "teilmarkt": "zfh", "zins": 0.022, "min": 0.015, "max": 0.035 },
+        { "teilmarkt": "etw", "zins": 0.025, "min": 0.018, "max": 0.038 },
+        { "teilmarkt": "mfh", "zins": 0.035, "min": 0.025, "max": 0.050 }
+      ]
+    },
+    "Baden-Württemberg": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.019, "min": 0.013, "max": 0.030 },
+        { "teilmarkt": "zfh", "zins": 0.023, "min": 0.016, "max": 0.035 },
+        { "teilmarkt": "etw", "zins": 0.026, "min": 0.019, "max": 0.040 },
+        { "teilmarkt": "mfh", "zins": 0.036, "min": 0.026, "max": 0.052 }
+      ]
+    },
+    "Hessen": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.020, "min": 0.014, "max": 0.032 },
+        { "teilmarkt": "zfh", "zins": 0.025, "min": 0.018, "max": 0.038 },
+        { "teilmarkt": "etw", "zins": 0.028, "min": 0.020, "max": 0.042 },
+        { "teilmarkt": "mfh", "zins": 0.038, "min": 0.028, "max": 0.055 }
+      ]
+    },
+    "Niedersachsen": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.024, "min": 0.016, "max": 0.038 },
+        { "teilmarkt": "zfh", "zins": 0.028, "min": 0.020, "max": 0.042 },
+        { "teilmarkt": "etw", "zins": 0.032, "min": 0.022, "max": 0.048 },
+        { "teilmarkt": "mfh", "zins": 0.044, "min": 0.032, "max": 0.062 }
+      ]
+    },
+    "Rheinland-Pfalz": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.025, "min": 0.018, "max": 0.038 },
+        { "teilmarkt": "zfh", "zins": 0.030, "min": 0.022, "max": 0.042 },
+        { "teilmarkt": "etw", "zins": 0.032, "min": 0.024, "max": 0.048 },
+        { "teilmarkt": "mfh", "zins": 0.045, "min": 0.033, "max": 0.062 }
+      ]
+    },
+    "Schleswig-Holstein": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.023, "min": 0.016, "max": 0.035 },
+        { "teilmarkt": "zfh", "zins": 0.028, "min": 0.020, "max": 0.040 },
+        { "teilmarkt": "etw", "zins": 0.030, "min": 0.022, "max": 0.045 },
+        { "teilmarkt": "mfh", "zins": 0.042, "min": 0.030, "max": 0.058 }
+      ]
+    },
+    "Hamburg": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.017, "min": 0.012, "max": 0.028 },
+        { "teilmarkt": "zfh", "zins": 0.022, "min": 0.015, "max": 0.033 },
+        { "teilmarkt": "etw", "zins": 0.024, "min": 0.018, "max": 0.036 },
+        { "teilmarkt": "mfh", "zins": 0.034, "min": 0.025, "max": 0.048 }
+      ]
+    },
+    "Berlin": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.018, "min": 0.012, "max": 0.028 },
+        { "teilmarkt": "zfh", "zins": 0.022, "min": 0.015, "max": 0.032 },
+        { "teilmarkt": "etw", "zins": 0.025, "min": 0.018, "max": 0.038 },
+        { "teilmarkt": "mfh", "zins": 0.035, "min": 0.025, "max": 0.050 }
+      ]
+    },
+    "Bremen": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.025, "min": 0.018, "max": 0.038 },
+        { "teilmarkt": "zfh", "zins": 0.030, "min": 0.022, "max": 0.042 },
+        { "teilmarkt": "etw", "zins": 0.032, "min": 0.024, "max": 0.048 },
+        { "teilmarkt": "mfh", "zins": 0.045, "min": 0.033, "max": 0.060 }
+      ]
+    },
+    "Saarland": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.028, "min": 0.020, "max": 0.042 },
+        { "teilmarkt": "zfh", "zins": 0.032, "min": 0.024, "max": 0.046 },
+        { "teilmarkt": "etw", "zins": 0.035, "min": 0.026, "max": 0.050 },
+        { "teilmarkt": "mfh", "zins": 0.048, "min": 0.035, "max": 0.065 }
+      ]
+    },
+    "Brandenburg": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.028, "min": 0.020, "max": 0.042 },
+        { "teilmarkt": "zfh", "zins": 0.032, "min": 0.024, "max": 0.046 },
+        { "teilmarkt": "etw", "zins": 0.035, "min": 0.025, "max": 0.050 },
+        { "teilmarkt": "mfh", "zins": 0.048, "min": 0.035, "max": 0.065 }
+      ]
+    },
+    "Sachsen": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.030, "min": 0.022, "max": 0.045 },
+        { "teilmarkt": "zfh", "zins": 0.034, "min": 0.025, "max": 0.048 },
+        { "teilmarkt": "etw", "zins": 0.036, "min": 0.026, "max": 0.052 },
+        { "teilmarkt": "mfh", "zins": 0.050, "min": 0.038, "max": 0.065 }
+      ]
+    },
+    "Sachsen-Anhalt": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.032, "min": 0.024, "max": 0.048 },
+        { "teilmarkt": "zfh", "zins": 0.036, "min": 0.026, "max": 0.050 },
+        { "teilmarkt": "etw", "zins": 0.038, "min": 0.028, "max": 0.055 },
+        { "teilmarkt": "mfh", "zins": 0.052, "min": 0.040, "max": 0.068 }
+      ]
+    },
+    "Thüringen": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.032, "min": 0.024, "max": 0.048 },
+        { "teilmarkt": "zfh", "zins": 0.036, "min": 0.026, "max": 0.050 },
+        { "teilmarkt": "etw", "zins": 0.038, "min": 0.028, "max": 0.055 },
+        { "teilmarkt": "mfh", "zins": 0.052, "min": 0.040, "max": 0.068 }
+      ]
+    },
+    "Mecklenburg-Vorpommern": {
+      "jahr": 2024,
+      "daten": [
+        { "teilmarkt": "efh", "zins": 0.030, "min": 0.022, "max": 0.045 },
+        { "teilmarkt": "zfh", "zins": 0.034, "min": 0.025, "max": 0.048 },
+        { "teilmarkt": "etw", "zins": 0.036, "min": 0.026, "max": 0.052 },
+        { "teilmarkt": "mfh", "zins": 0.050, "min": 0.038, "max": 0.065 }
+      ]
+    }
+  }
 }
