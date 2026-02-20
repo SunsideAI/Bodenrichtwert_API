@@ -31,6 +31,25 @@ export interface ImmoScoutPrices {
     lng: number;
 }
 /**
+ * Entfernt offizielle deutsche Gemeinde-Präfixe, die IS24-Atlas nicht nutzt.
+ *   "Hansestadt Lübeck" → "Lübeck"
+ *   "Universitätsstadt Tübingen" → "Tübingen"
+ *   "Landeshauptstadt München" → "München"
+ *   "Bundesstadt Bonn" → "Bonn"
+ *   "Freie und Hansestadt Hamburg" → "Hamburg"
+ *   "Große Kreisstadt Vaihingen an der Enz" → "Vaihingen an der Enz"
+ */
+export declare function normalizeCityForIS24(city: string): string;
+/**
+ * Generiert Slug-Varianten für zusammengesetzte Ortsnamen.
+ * Wird als Zwischen-Fallback genutzt, bevor auf Landkreis-Ebene gesucht wird.
+ *   "Bad Iburg" → ["iburg"]
+ *   "Sankt Augustin" → ["st-augustin", "st.-augustin"]
+ *   "Neustadt an der Weinstraße" → ["neustadt"]
+ *   "Frankfurt (Oder)" → ["frankfurt"]
+ */
+export declare function generateCitySlugVariants(city: string): string[];
+/**
  * Konvertiert einen deutschen Ortsnamen in einen ImmoScout-URL-Slug.
  * ImmoScout nutzt echte Unicode-Zeichen (ü, ö, ä, ß) in URLs:
  *   "München" → "münchen"  (NICHT "muenchen"!)

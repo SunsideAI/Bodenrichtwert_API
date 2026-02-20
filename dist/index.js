@@ -8,7 +8,7 @@ import { routeToAdapter } from './state-router.js';
 import { cache, immoCache } from './cache.js';
 import { buildEnrichment } from './enrichment.js';
 import { buildBewertung } from './bewertung.js';
-import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify } from './utils/immoscout-scraper.js';
+import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify, normalizeCityForIS24, generateCitySlugVariants } from './utils/immoscout-scraper.js';
 import { fetchPreisindex } from './utils/bundesbank.js';
 import { fetchImmobilienrichtwert } from './utils/nrw-irw.js';
 import { fetchBaupreisindex } from './utils/destatis.js';
@@ -29,7 +29,7 @@ if (token) {
  * "Landkreis Gifhorn" → "Gifhorn", "Kreis Soest" → "Soest", "München" → ""
  */
 function extractKreisname(county) {
-    return county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.|Städteregion|Regionalverband)\s+/i, '').trim();
+    return county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.|Städteregion|Regionalverband|Hansestadt|Universitätsstadt|Große Kreisstadt)\s+/i, '').trim();
 }
 /**
  * Holt ImmoScout-Marktdaten für eine Stadt (mit Cache).
@@ -39,8 +39,10 @@ function extractKreisname(county) {
 async function fetchMarktdaten(state, city, county) {
     if (!city)
         return null;
+    // Offizielle Präfixe entfernen: "Hansestadt Lübeck" → "Lübeck"
+    const normalizedCity = normalizeCityForIS24(city);
     const bundeslandSlug = slugify(state);
-    const stadtSlug = slugify(city);
+    const stadtSlug = slugify(normalizedCity);
     const cacheKey = `${bundeslandSlug}:${stadtSlug}`;
     // 1. Cache prüfen
     const cached = immoCache.get(cacheKey);
@@ -49,11 +51,23 @@ async function fetchMarktdaten(state, city, county) {
         return cached;
     }
     // 2. Stadt-Level Atlas
-    console.log(`ImmoScout: Marktdaten für ${city} (${state}) abrufen...`);
+    console.log(`ImmoScout: Marktdaten für ${normalizedCity} (${state}) abrufen...`);
     const prices = await scrapeImmoScoutAtlas(bundeslandSlug, stadtSlug);
     if (prices) {
         immoCache.set(cacheKey, prices);
         return prices;
+    }
+    // 2b. Slug-Varianten für zusammengesetzte Ortsnamen (vor Landkreis-Fallback)
+    const variants = generateCitySlugVariants(normalizedCity);
+    for (const variant of variants) {
+        if (variant === stadtSlug)
+            continue; // bereits versucht
+        console.log(`ImmoScout: Versuche Slug-Variante "${variant}" für ${normalizedCity}...`);
+        const variantPrices = await scrapeImmoScoutAtlas(bundeslandSlug, variant);
+        if (variantPrices) {
+            immoCache.set(cacheKey, variantPrices);
+            return variantPrices;
+        }
     }
     // 3. Landkreis-Atlas als Fallback (für Kleinstädte ohne eigene Atlas-Seite)
     if (county) {
@@ -112,7 +126,7 @@ async function fetchDistrictMarktdaten(state, city, district, cityPrices) {
         return cityPrices;
     try {
         const bundeslandSlug = slugify(state);
-        const stadtSlug = slugify(city);
+        const stadtSlug = slugify(normalizeCityForIS24(city));
         const districts = await scrapeImmoScoutDistricts(bundeslandSlug, stadtSlug);
         if (districts.length === 0)
             return cityPrices;

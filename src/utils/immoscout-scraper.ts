@@ -87,6 +87,67 @@ export interface ImmoScoutPrices {
 // ─── URL-Slugifizierung ────────────────────────────────────────────────────
 
 /**
+ * Entfernt offizielle deutsche Gemeinde-Präfixe, die IS24-Atlas nicht nutzt.
+ *   "Hansestadt Lübeck" → "Lübeck"
+ *   "Universitätsstadt Tübingen" → "Tübingen"
+ *   "Landeshauptstadt München" → "München"
+ *   "Bundesstadt Bonn" → "Bonn"
+ *   "Freie und Hansestadt Hamburg" → "Hamburg"
+ *   "Große Kreisstadt Vaihingen an der Enz" → "Vaihingen an der Enz"
+ */
+export function normalizeCityForIS24(city: string): string {
+  if (!city) return city;
+  return city
+    .replace(/^(Freie und Hansestadt|Freie Hansestadt|Große Kreisstadt|kreisfreie Stadt|Universitätsstadt|Wissenschaftsstadt|Landeshauptstadt|Hansestadt|Bundesstadt|Fontanestadt|Lutherstadt|Schillerstadt|Goethestadt|Römerstadt|Domstadt|Bergstadt|Seestadt|Bäderstadt)\s+/i, '')
+    .trim();
+}
+
+/**
+ * Generiert Slug-Varianten für zusammengesetzte Ortsnamen.
+ * Wird als Zwischen-Fallback genutzt, bevor auf Landkreis-Ebene gesucht wird.
+ *   "Bad Iburg" → ["iburg"]
+ *   "Sankt Augustin" → ["st-augustin", "st.-augustin"]
+ *   "Neustadt an der Weinstraße" → ["neustadt"]
+ *   "Frankfurt (Oder)" → ["frankfurt"]
+ */
+export function generateCitySlugVariants(city: string): string[] {
+  if (!city) return [];
+  const variants: string[] = [];
+
+  // 1. "Bad XYZ" → "XYZ"
+  const badMatch = city.match(/^Bad\s+(.+)$/i);
+  if (badMatch) {
+    variants.push(slugify(badMatch[1]));
+  }
+
+  // 2. "Sankt/St. XYZ" → "st-xyz" / "st.-xyz" / "sankt-xyz"
+  const sanktMatch = city.match(/^Sankt\s+(.+)$/i);
+  if (sanktMatch) {
+    variants.push(slugify(`St. ${sanktMatch[1]}`));
+    variants.push(slugify(`St ${sanktMatch[1]}`));
+  }
+  const stMatch = city.match(/^St\.?\s+(.+)$/i);
+  if (stMatch) {
+    variants.push(slugify(`Sankt ${stMatch[1]}`));
+  }
+
+  // 3. Klammern entfernen: "Frankfurt (Oder)" → "Frankfurt"
+  const ohneKlammern = city.replace(/\s*\(.*?\)\s*/g, '').trim();
+  if (ohneKlammern !== city) {
+    variants.push(slugify(ohneKlammern));
+  }
+
+  // 4. "XYZ an der ABC" / "XYZ am ABC" / "XYZ im ABC" → "XYZ"
+  const prepositionMatch = city.match(/^(.+?)\s+(an der|an den|am|im|in der|ob der|bei|bei der|vor der)\s+/i);
+  if (prepositionMatch && prepositionMatch[1].length >= 3) {
+    variants.push(slugify(prepositionMatch[1]));
+  }
+
+  // Duplikate und leere entfernen
+  return [...new Set(variants)].filter(v => v.length > 0);
+}
+
+/**
  * Konvertiert einen deutschen Ortsnamen in einen ImmoScout-URL-Slug.
  * ImmoScout nutzt echte Unicode-Zeichen (ü, ö, ä, ß) in URLs:
  *   "München" → "münchen"  (NICHT "muenchen"!)

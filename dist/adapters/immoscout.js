@@ -1,4 +1,4 @@
-import { scrapeImmoScoutAtlas, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify, ATLAS_BASE } from '../utils/immoscout-scraper.js';
+import { scrapeImmoScoutAtlas, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify, normalizeCityForIS24, ATLAS_BASE } from '../utils/immoscout-scraper.js';
 const NOMINATIM_URL = process.env.NOMINATIM_URL || 'https://nominatim.openstreetmap.org';
 /**
  * ImmoScout Atlas Adapter
@@ -119,13 +119,15 @@ export class ImmoScoutAdapter {
             const stadt = address.city || address.town || address.municipality || address.county || '';
             if (!stadt)
                 return null;
+            // Offizielle Präfixe entfernen: "Hansestadt Lübeck" → "Lübeck"
+            const normalizedStadt = normalizeCityForIS24(stadt);
             // Landkreis: z.B. "Landkreis Konstanz" → "Konstanz"
             const county = address.county || '';
-            const countyName = county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.)\s+/i, '').trim();
+            const countyName = county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.|Städteregion|Regionalverband)\s+/i, '').trim();
             // Bundesland-Slug: aus dem Adapter-State ableiten (nicht aus Nominatim)
             return {
-                stadt,
-                stadtSlug: slugify(stadt),
+                stadt: normalizedStadt,
+                stadtSlug: slugify(normalizedStadt),
                 county,
                 countySlug: countyName ? slugify(countyName) : '',
                 bundeslandSlug: this.bundeslandSlug,

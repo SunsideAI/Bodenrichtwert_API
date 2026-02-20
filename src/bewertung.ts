@@ -135,15 +135,26 @@ function calcModernisierungFaktor(
   if (!modernisierung) return 0;
 
   // Numerischer Score: 5=Kernsanierung, 4=Umfassend, 3=Teilweise, 2=Einzelne, 1=Keine
+  // Kontinuierliche Interpolation statt diskreter Stufen für sanftere Übergänge
   const score = Number(modernisierung);
   if (!isNaN(score) && String(modernisierung).trim() !== '') {
     const alter = baujahr ?? 2000;
-    if (score >= 5) return 0.02;
-    if (score >= 4) return 0;
-    const baseFaktor =
-      score >= 3 ? (alter < 1970 ? -0.06 : alter < 1990 ? -0.04 : -0.04) :
-      score >= 2 ? (alter < 1970 ? -0.10 : alter < 1990 ? -0.08 : -0.07) :
-                   (alter < 1970 ? -0.18 : alter < 1990 ? -0.12 : -0.06);
+    const clampedScore = Math.max(1, Math.min(5, score));
+
+    // Eckpunkte: Score 5 = +0.02, Score 4 = 0, Score 1 = Floor (altersabhängig)
+    const ceiling = 0.02;   // Score 5: Kernsanierung/Neuwertig
+    const neutral = 0;      // Score 4: Umfassend modernisiert
+    const floor = alter < 1970 ? -0.18 : alter < 1990 ? -0.12 : -0.06;
+
+    let baseFaktor: number;
+    if (clampedScore >= 4) {
+      // Score 4–5: linear von 0 bis +0.02
+      baseFaktor = neutral + (clampedScore - 4) * (ceiling - neutral);
+    } else {
+      // Score 1–4: linear von floor bis 0
+      baseFaktor = floor + ((clampedScore - 1) / 3) * (neutral - floor);
+    }
+    baseFaktor = Math.round(baseFaktor * 100) / 100;
     return applyLageModernisierung(baseFaktor, lage);
   }
 
@@ -286,15 +297,35 @@ function calcStichtagKorrektur(
  * Empirisch liegt der Angebots-Kaufpreis-Abschlag bei 5–15 % je nach Markt
  * (vgl. empirica Preisdatenbank, Sprengnetter Marktwertmodell).
  *
- * Regionalisiert nach Lage-Cluster:
+ * Regionalisiert nach Lage-Cluster + dynamisch nach Marktzyklus:
  *   A-Lage (Verkäufermarkt): ~7% Abschlag (Käufer bieten nahe am Angebotspreis)
  *   B-Lage (ausgeglichen):   ~10% Abschlag (Standard)
  *   C-Lage (Käufermarkt):    ~13% Abschlag (mehr Verhandlungsspielraum)
+ *
+ * Marktzyklus-Anpassung via Bundesbank-Preisindex (YoY-Veränderung):
+ *   Steigender Markt → Abschlag reduzieren (Verkäufermarkt: Preise nahe Angebot)
+ *   Fallender Markt → Abschlag erhöhen (Käufermarkt: mehr Verhandlung)
  */
-function calcAngebotspreisAbschlag(lage: LageCluster): number {
-  if (lage === 'A') return 0.93;
-  if (lage === 'C') return 0.87;
-  return 0.90;
+function calcAngebotspreisAbschlag(lage: LageCluster, preisindex?: PreisindexEntry[] | null): number {
+  const baseAbschlag = lage === 'A' ? 0.07 : lage === 'C' ? 0.13 : 0.10;
+
+  // Marktzyklus-Anpassung: YoY-Trend aus Preisindex ableiten
+  if (preisindex && preisindex.length >= 5) {
+    const latest = preisindex[preisindex.length - 1];
+    // Suche Eintrag ~4 Quartale zurück (YoY-Vergleich)
+    const oneYearAgo = preisindex.length >= 5 ? preisindex[preisindex.length - 5] : null;
+
+    if (oneYearAgo && latest.index > 0 && oneYearAgo.index > 0) {
+      const yoyChange = (latest.index - oneYearAgo.index) / oneYearAgo.index;
+      // Steigender Markt (yoyChange > 0): Abschlag senken; Fallender Markt: erhöhen
+      // 50% des YoY-Signals als Anpassung, Clamp auf [3%, 18%]
+      const adjustment = -yoyChange * 0.5;
+      const adjustedAbschlag = Math.max(0.03, Math.min(0.18, baseAbschlag + adjustment));
+      return 1 - adjustedAbschlag;
+    }
+  }
+
+  return 1 - baseAbschlag;
 }
 
 // ─── Fallback-Konstanten ─────────────────────────────────────────────────────
@@ -585,7 +616,7 @@ export function buildBewertung(
 
   // ─── Lage-Cluster bestimmen (für regionalisierte Faktoren) ────────────────
   const lageCluster = determineLageCluster(brw, marktPreisProQm);
-  const angebotspreisAbschlag = calcAngebotspreisAbschlag(lageCluster);
+  const angebotspreisAbschlag = calcAngebotspreisAbschlag(lageCluster, preisindex);
 
   // ─── Grundfläche: verwende Original oder schätze (NUR für Häuser) ───────────
   let grundflaeche = input.grundstuecksflaeche || 0;
@@ -614,6 +645,13 @@ export function buildBewertung(
     faktoren.objektunterart +
     faktoren.neubau +
     faktoren.stichtag_korrektur;
+
+  // Gesamt-Deckelung: Kein Objekt verliert >30% durch Zustandsmerkmale allein.
+  // Extreme Kumulierung (z.B. -16% Alter + -10% Modernisierung + -8% Typ + -3% Energie + -3% Ausstattung = -40%)
+  // ist unrealistisch, da sich die Faktoren in der Praxis überlagern (diminishing effects).
+  if (faktoren.gesamt < -0.30) {
+    faktoren.gesamt = -0.30;
+  }
 
   // Methode bestimmen
   const hasBRW = brw != null && brw.wert > 0;
@@ -765,10 +803,32 @@ export function buildBewertung(
       const hatStadtteil = !!marktdaten?.stadtteil;
       let nhkWeight = hatStadtteil ? 0.40 : 0.60;
 
-      // Divergenz-Prüfung: bei starker Abweichung NHK stärker gewichten
+      // Baujahr-basierte Anpassung: NHK ist weniger zuverlässig bei Altbauten und Neubauten
+      const baujahr = input.baujahr;
+      if (baujahr != null) {
+        if (baujahr < 1970) {
+          // Altbauten: NHK unterschätzt systematisch (andere Bauweise, lineare AWM zu aggressiv)
+          nhkWeight = Math.max(0.25, nhkWeight - 0.10);
+        } else if (baujahr > 2015) {
+          // Neubauten: NHK × hoher BPI-Faktor kann überschätzen
+          nhkWeight = Math.max(0.30, nhkWeight - 0.05);
+        }
+      }
+
+      // Divergenz-Prüfung: Richtung + Datengranularität beachten
       const divergenz = Math.abs(nhkSachwert - is24Gesamtwert) / Math.max(nhkSachwert, is24Gesamtwert);
       if (divergenz > 0.40) {
-        nhkWeight = Math.min(0.80, nhkWeight + 0.10);
+        if (nhkSachwert > is24Gesamtwert) {
+          // NHK höher als IS24 → eher konservativ, NHK mehr gewichten
+          nhkWeight = Math.min(0.80, nhkWeight + 0.10);
+        } else if (hatStadtteil) {
+          // NHK niedriger als IS24 + Stadtteil-Daten (hohe Präzision) → IS24 mehr vertrauen
+          nhkWeight = Math.max(0.25, nhkWeight - 0.10);
+        } else {
+          // NHK niedriger als IS24 + nur Stadt-Durchschnitt → NHK trotzdem stärken
+          // (Stadt-Durchschnitt kann teures Zentrum vs. günstigen Vorort nicht unterscheiden)
+          nhkWeight = Math.min(0.80, nhkWeight + 0.10);
+        }
         hinweise.push(
           `IS24-Marktpreis (${is24Gesamtwert.toLocaleString('de-DE')} €) weicht ${Math.round(divergenz * 100)}% vom NHK-Sachwert (${nhkSachwert.toLocaleString('de-DE')} €) ab. NHK-Gewichtung erhöht.`,
         );
@@ -1014,13 +1074,14 @@ export function buildBewertung(
     }
 
     // Signal 2: Ertragswert-Abgleich (stärkste Cross-Validation)
-    // Wenn Ertragswert verfügbar und Abweichung >35%, Wert in Richtung Ertragswert ziehen
+    // Wenn Ertragswert verfügbar und Abweichung >25%, graduiert in Richtung Ertragswert korrigieren
     if (ertragswertErgebnis && ertragswertErgebnis > 0) {
       const ewAbweichung = (realistischerImmobilienwert - ertragswertErgebnis) / ertragswertErgebnis;
-      if (Math.abs(ewAbweichung) > 0.35) {
-        // Korrektur: 30% in Richtung Ertragswert ziehen
+      if (Math.abs(ewAbweichung) > 0.25) {
+        // Graduierte Korrektur: stärkere Divergenz → stärkerer Pull zum Ertragswert (max 40%)
+        const pullStrength = Math.min(0.40, 0.25 + (Math.abs(ewAbweichung) - 0.25) * 0.30);
         const korrigiert = Math.round(
-          realistischerImmobilienwert * 0.70 + ertragswertErgebnis * 0.30,
+          realistischerImmobilienwert * (1 - pullStrength) + ertragswertErgebnis * pullStrength,
         );
         hinweise.push(
           `Plausibilitätskorrektur: Sachwert weicht ${Math.round(ewAbweichung * 100)}% vom Ertragswert ab. Wert um ${Math.round(Math.abs(korrigiert - realistischerImmobilienwert) / 1000)}T€ korrigiert.`,
