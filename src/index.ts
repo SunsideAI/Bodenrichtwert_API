@@ -319,6 +319,23 @@ app.post('/api/enrich', async (c) => {
       }, 400);
     }
 
+    // Input-Echo: alle Bewertungsparameter zurückgeben (Debugging)
+    const inputEcho = {
+      adresse: adressString,
+      koordinaten: { lat: geo.lat, lon: geo.lon },
+      bundesland: geo.state,
+      bewertungsparameter: {
+        art: body.art || null,
+        baujahr: parseNum(body.baujahr),
+        wohnflaeche: parseNum(body.wohnflaeche),
+        grundstuecksflaeche: parseNum(body.grundstuecksflaeche),
+        objektunterart: body.objektunterart || null,
+        modernisierung: body.modernisierung || null,
+        energie: body.energie || null,
+        ausstattung: body.ausstattung || null,
+      },
+    };
+
     // 2. Alle externen Datenquellen parallel starten (blockiert nie)
     const marktdatenPromise = fetchMarktdaten(geo.state, geo.city, geo.county)
       .then((cityPrices) => fetchDistrictMarktdaten(geo.state, geo.city, geo.district, cityPrices))
@@ -352,11 +369,7 @@ app.post('/api/enrich', async (c) => {
       const elapsed = Date.now() - start;
       return c.json({
         status: 'success',
-        input_echo: {
-          adresse: adressString,
-          koordinaten: { lat: geo.lat, lon: geo.lon },
-          bundesland: geo.state,
-        },
+        input_echo: inputEcho,
         bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') as string },
         marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
         erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
@@ -375,11 +388,7 @@ app.post('/api/enrich', async (c) => {
       const elapsed = Date.now() - start;
       return c.json({
         status: 'manual_required',
-        input_echo: {
-          adresse: adressString,
-          koordinaten: { lat: geo.lat, lon: geo.lon },
-          bundesland: geo.state,
-        },
+        input_echo: inputEcho,
         bodenrichtwert: {
           wert: null,
           bundesland: geo.state,
@@ -408,11 +417,7 @@ app.post('/api/enrich', async (c) => {
     if (!brw) {
       return c.json({
         status: 'not_found',
-        input_echo: {
-          adresse: adressString,
-          koordinaten: { lat: geo.lat, lon: geo.lon },
-          bundesland: geo.state,
-        },
+        input_echo: inputEcho,
         bodenrichtwert: {
           wert: null,
           bundesland: geo.state,
@@ -434,11 +439,7 @@ app.post('/api/enrich', async (c) => {
     // 7. Response
     return c.json({
       status: 'success',
-      input_echo: {
-        adresse: adressString,
-        koordinaten: { lat: geo.lat, lon: geo.lon },
-        bundesland: geo.state,
-      },
+      input_echo: inputEcho,
       bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
       marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
