@@ -29,7 +29,7 @@ if (token) {
  * "Landkreis Gifhorn" → "Gifhorn", "Kreis Soest" → "Soest", "München" → ""
  */
 function extractKreisname(county) {
-    return county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.)\s+/i, '').trim();
+    return county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.|Städteregion|Regionalverband)\s+/i, '').trim();
 }
 /**
  * Holt ImmoScout-Marktdaten für eine Stadt (mit Cache).

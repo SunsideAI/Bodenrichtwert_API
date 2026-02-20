@@ -781,6 +781,11 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
         konfidenz = 'gering';
         spread = 0.20;
     }
+    else if (bewertungsmethode === 'sachwert-lite' && !marktPreisProQm) {
+        // NHK ohne IS24-Marktvergleich hat höhere Unsicherheit (~20-30%)
+        konfidenz = 'mittel';
+        spread = 0.12;
+    }
     else {
         const cs = determineConfidenceAndSpread(brw, bewertungsmethode, ertragswertErgebnis != null);
         konfidenz = cs.konfidenz;
