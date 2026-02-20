@@ -33,23 +33,43 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
   }
 
   async getBodenrichtwert(lat: number, lon: number): Promise<NormalizedBRW | null> {
-    // 1. Reverse-Geocode: lat/lon → Stadt
+    // 1. Reverse-Geocode: lat/lon → Stadt + Landkreis
     const location = await this.reverseGeocode(lat, lon);
     if (!location) {
       console.warn(`${this.stateCode} ImmoScout: Reverse-Geocode failed for ${lat},${lon}`);
       return null;
     }
 
-    console.log(`${this.stateCode} ImmoScout: Reverse-Geocode → ${location.stadt} (${location.bundeslandSlug}/${location.stadtSlug})`);
+    console.log(`${this.stateCode} ImmoScout: Reverse-Geocode → ${location.stadt} (${location.bundeslandSlug}/${location.stadtSlug}), Landkreis: ${location.county || '-'}`);
 
-    // 2. ImmoScout Atlas scrapen
-    const prices = await scrapeImmoScoutAtlas(
+    // 2. ImmoScout Atlas scrapen — 3-stufiger Fallback
+    let prices = await scrapeImmoScoutAtlas(
       location.bundeslandSlug,
       location.stadtSlug,
     );
+    let datenquelle = location.stadt;
+
+    // Fallback 1: Landkreis-Name als Stadt (Kreisstadt = Landkreis-Name, z.B. "Konstanz")
+    if (!prices && location.countySlug && location.countySlug !== location.stadtSlug) {
+      console.log(`${this.stateCode} ImmoScout: Kein Atlas für ${location.stadt}, versuche Landkreis "${location.county}" (${location.countySlug})...`);
+      prices = await scrapeImmoScoutAtlas(location.bundeslandSlug, location.countySlug);
+      if (prices) {
+        datenquelle = `${location.county} (Landkreis-Durchschnitt)`;
+      }
+    }
+
+    // Fallback 2: "landkreis-{name}" Format (einige Atlas-Seiten nutzen dieses Format)
+    if (!prices && location.countySlug) {
+      const landkreisSlug = `landkreis-${location.countySlug}`;
+      console.log(`${this.stateCode} ImmoScout: Versuche Atlas-Format "landkreis-${location.countySlug}"...`);
+      prices = await scrapeImmoScoutAtlas(location.bundeslandSlug, landkreisSlug);
+      if (prices) {
+        datenquelle = `${location.county} (Landkreis-Atlas)`;
+      }
+    }
 
     if (!prices) {
-      console.warn(`${this.stateCode} ImmoScout: Keine Preisdaten für ${location.stadt}`);
+      console.warn(`${this.stateCode} ImmoScout: Keine Preisdaten für ${location.stadt} (alle Fallbacks erschöpft)`);
       return null;
     }
 
@@ -58,7 +78,7 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
       ?? (prices.wohnung_kauf_preis ? Math.round(prices.wohnung_kauf_preis * 0.9) : null);
 
     if (!basisPreis || basisPreis <= 0) {
-      console.warn(`${this.stateCode} ImmoScout: Kein Hauspreis für ${location.stadt}`);
+      console.warn(`${this.stateCode} ImmoScout: Kein Hauspreis für ${datenquelle}`);
       return null;
     }
 
@@ -66,7 +86,7 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
     const { wert, factor } = this.estimateBRW(basisPreis);
     const datenstand = `${prices.jahr}-Q${prices.quartal}`;
 
-    console.log(`${this.stateCode} ImmoScout: ${location.stadt} → Hauspreis ${basisPreis} €/m² × ${factor} = ${wert} €/m² (geschätzt)`);
+    console.log(`${this.stateCode} ImmoScout: ${datenquelle} → Hauspreis ${basisPreis} €/m² × ${factor} = ${wert} €/m² (geschätzt)`);
 
     return {
       wert,
@@ -79,21 +99,23 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
       quelle: 'ImmoScout24 Atlas (Schätzwert)',
       lizenz: 'Schätzung basierend auf Marktdaten. Kein offizieller Bodenrichtwert.',
       schaetzung: {
-        methode: 'ImmoScout Atlas Marktpreise × preisabhängiger Faktor',
+        methode: `ImmoScout Atlas Marktpreise × preisabhängiger Faktor (${datenquelle})`,
         basis_preis: basisPreis,
         faktor: factor,
         datenstand,
-        hinweis: 'Schätzwert basierend auf Immobilienmarktdaten. Kein offizieller Bodenrichtwert. Abweichungen von ±30-50% zum tatsächlichen BRW sind möglich.',
+        hinweis: `Schätzwert basierend auf ${datenquelle} Immobilienmarktdaten. Kein offizieller Bodenrichtwert. Abweichungen von ±30-50% zum tatsächlichen BRW sind möglich.`,
       },
     };
   }
 
   /**
-   * Reverse-Geocode via Nominatim: lat/lon → Stadt + Slugs
+   * Reverse-Geocode via Nominatim: lat/lon → Stadt + Landkreis + Slugs
    */
   private async reverseGeocode(lat: number, lon: number): Promise<{
     stadt: string;
     stadtSlug: string;
+    county: string;
+    countySlug: string;
     bundeslandSlug: string;
   } | null> {
     try {
@@ -115,10 +137,16 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
       const stadt = address.city || address.town || address.municipality || address.county || '';
       if (!stadt) return null;
 
+      // Landkreis: z.B. "Landkreis Konstanz" → "Konstanz"
+      const county = address.county || '';
+      const countyName = county.replace(/^(Landkreis|Landkr\.|Kreis|Lkr\.)\s+/i, '').trim();
+
       // Bundesland-Slug: aus dem Adapter-State ableiten (nicht aus Nominatim)
       return {
         stadt,
         stadtSlug: slugify(stadt),
+        county,
+        countySlug: countyName ? slugify(countyName) : '',
         bundeslandSlug: this.bundeslandSlug,
       };
     } catch (err) {

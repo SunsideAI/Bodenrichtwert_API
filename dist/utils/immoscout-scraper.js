@@ -68,6 +68,23 @@ export function slugify(name) {
         .replace(/-+/g, '-') // Doppelte Bindestriche
         .replace(/^-|-$/g, ''); // Führende/nachfolgende Bindestriche
 }
+/**
+ * ASCII-only Slug für IS24 Mobile API Geocode-Pfade.
+ * Die Mobile API verwendet teils ASCII-Slugs (ü→ue, ö→oe, ä→ae, ß→ss)
+ * statt Unicode wie der Atlas.
+ */
+export function slugifyAscii(name) {
+    return name
+        .toLowerCase()
+        .replace(/ä/g, 'ae')
+        .replace(/ö/g, 'oe')
+        .replace(/ü/g, 'ue')
+        .replace(/ß/g, 'ss')
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+}
 // ─── _atlas_initialState Extraktion ────────────────────────────────────────
 /**
  * Extrahiert das _atlas_initialState JSON-Objekt aus dem HTML.
@@ -410,6 +427,19 @@ export async function scrapeImmoScoutSearch(bundeslandSlug, kreisSlug, ortSlug, 
     // Format 3: Nur Kreis-Ebene (breitere Suche)
     if (kreisSlug) {
         geocodeCandidates.push(`/de/${bundeslandSlug}/${kreisSlug}`);
+    }
+    // ASCII-Varianten: Mobile API nutzt teils ASCII-Slugs (ü→ue, ö→oe usw.)
+    const bsAscii = slugifyAscii(bundeslandSlug);
+    const ortAscii = slugifyAscii(ortSlug);
+    const kreisAscii = kreisSlug ? slugifyAscii(kreisSlug) : undefined;
+    if (bsAscii !== bundeslandSlug || ortAscii !== ortSlug) {
+        if (kreisAscii) {
+            geocodeCandidates.push(`/de/${bsAscii}/${kreisAscii}/${ortAscii}`);
+        }
+        geocodeCandidates.push(`/de/${bsAscii}/${ortAscii}`);
+        if (kreisAscii) {
+            geocodeCandidates.push(`/de/${bsAscii}/${kreisAscii}`);
+        }
     }
     let hausListings = [];
     let wohnungListings = [];
