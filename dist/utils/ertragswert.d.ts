@@ -34,6 +34,8 @@ export interface ErtragswertInput {
     restnutzungsdauer?: number;
     /** Gebäudetyp (für Liegenschaftszins-Bestimmung) */
     gebaeudTyp: 'mfh' | 'etw' | 'efh' | 'zfh';
+    /** Bundesland (für regionale GMB-Liegenschaftszinssätze) */
+    bundesland?: string;
 }
 export interface ErtragswertResult {
     /** Ertragswert (Gesamtwert) in EUR */

@@ -36,9 +36,11 @@ export interface NHKResult {
  * Bestimmt den Marktanpassungsfaktor (Sachwertfaktor) anhand des
  * vorlaeufigen Sachwerts und des BRW-Niveaus.
  *
- * Basis: Anlage 25 BewG (vereinfachte Approximation).
+ * Priorität:
+ *   1. GMB-Daten (regionale Sachwertfaktoren aus Grundstücksmarktberichten)
+ *   2. Anlage 25 BewG (vereinfachte Approximation, Fallback)
  */
-export declare function lookupMAF(vorlaeufigSachwert: number, brwProQm: number): number;
+export declare function lookupMAF(vorlaeufigSachwert: number, brwProQm: number, bundesland?: string): number;
 /**
  * Mappt objektunterart-String auf GebaeudTyp.
  * Gleiche Logik wie calcObjektunterartFaktor in bewertung.ts.
@@ -61,10 +63,11 @@ export declare function mapAusstattung(ausstattung: string | null): Standardstuf
  * @param istHaus - true = Haus, false = Wohnung (Default: true)
  * @param brwProQm - Bodenrichtwert EUR/m² (für MAF-Bestimmung, Default: 100)
  * @param externalBpi - Externer Baupreisindex {aktuell, basis_2010, stand, quelle} (falls verfügbar)
+ * @param bundesland - Bundesland (für regionale GMB-Sachwertfaktoren)
  */
 export declare function calcGebaeudewertNHK(wohnflaeche: number, baujahr: number | null, objektunterart: string | null, ausstattung: string | null, modernisierung: string | null, istHaus?: boolean, brwProQm?: number, externalBpi?: {
     aktuell: number;
     basis_2010: number;
     stand: string;
     quelle: string;
-} | null): NHKResult;
+} | null, bundesland?: string): NHKResult;

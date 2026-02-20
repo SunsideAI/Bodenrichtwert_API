@@ -89,13 +89,64 @@ const MAF_TABLE = [
     { sachwertBis: 500000, faktoren: [0.8, 0.9, 1.0, 1.1, 1.2] },
     { sachwertBis: Infinity, faktoren: [0.8, 0.85, 0.95, 1.05, 1.15] },
 ];
+// ─── GMB-Daten Loader (Sachwertfaktoren aus Grundstücksmarktberichten) ────────
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+let _gmbMAFCache = null;
+let _gmbMAFLoaded = false;
+function loadGMBSachwertfaktoren() {
+    if (_gmbMAFLoaded)
+        return _gmbMAFCache;
+    _gmbMAFLoaded = true;
+    try {
+        const filePath = join(import.meta.dirname ?? '.', '..', '..', 'data', 'gmb', 'sachwertfaktoren.json');
+        if (!existsSync(filePath))
+            return null;
+        const data = JSON.parse(readFileSync(filePath, 'utf-8'));
+        if (data?.bundeslaender && Object.keys(data.bundeslaender).length > 0) {
+            _gmbMAFCache = data;
+            return _gmbMAFCache;
+        }
+    }
+    catch { /* Fallback auf Anlage 25 BewG */ }
+    return null;
+}
 /**
  * Bestimmt den Marktanpassungsfaktor (Sachwertfaktor) anhand des
  * vorlaeufigen Sachwerts und des BRW-Niveaus.
  *
- * Basis: Anlage 25 BewG (vereinfachte Approximation).
+ * Priorität:
+ *   1. GMB-Daten (regionale Sachwertfaktoren aus Grundstücksmarktberichten)
+ *   2. Anlage 25 BewG (vereinfachte Approximation, Fallback)
  */
-export function lookupMAF(vorlaeufigSachwert, brwProQm) {
+export function lookupMAF(vorlaeufigSachwert, brwProQm, bundesland) {
+    // 1. Versuch: GMB-Daten
+    if (bundesland) {
+        const gmb = loadGMBSachwertfaktoren();
+        if (gmb?.bundeslaender[bundesland]) {
+            const blData = gmb.bundeslaender[bundesland];
+            // Suche passenden Faktor nach Preissegment (vorlaeufiger Sachwert)
+            // GMB-Daten haben Segmente wie "bis 100.000", "100.000-200.000", etc.
+            for (const entry of blData.daten) {
+                // Einfaches Matching: Segment-Name enthält Preisbereich
+                const numbers = entry.segment.match(/[\d.]+/g)?.map(Number) ?? [];
+                if (numbers.length >= 2) {
+                    const [low, high] = numbers;
+                    if (vorlaeufigSachwert >= low && vorlaeufigSachwert <= high) {
+                        return entry.faktor;
+                    }
+                }
+                else if (numbers.length === 1) {
+                    // "bis X" oder "ab X"
+                    if (entry.segment.includes('bis') && vorlaeufigSachwert <= numbers[0])
+                        return entry.faktor;
+                    if (entry.segment.includes('ab') && vorlaeufigSachwert >= numbers[0])
+                        return entry.faktor;
+                }
+            }
+        }
+    }
+    // 2. Fallback: Anlage 25 BewG
     // BRW-Niveau-Index: [≤30, ≤60, ≤120, ≤180, >180]
     let brwIdx;
     if (brwProQm <= 30)
@@ -226,8 +277,9 @@ function calcModifizierteRestnutzungsdauer(restnutzungsdauer, gesamtnutzungsdaue
  * @param istHaus - true = Haus, false = Wohnung (Default: true)
  * @param brwProQm - Bodenrichtwert EUR/m² (für MAF-Bestimmung, Default: 100)
  * @param externalBpi - Externer Baupreisindex {aktuell, basis_2010, stand, quelle} (falls verfügbar)
+ * @param bundesland - Bundesland (für regionale GMB-Sachwertfaktoren)
  */
-export function calcGebaeudewertNHK(wohnflaeche, baujahr, objektunterart, ausstattung, modernisierung, istHaus = true, brwProQm = 100, externalBpi) {
+export function calcGebaeudewertNHK(wohnflaeche, baujahr, objektunterart, ausstattung, modernisierung, istHaus = true, brwProQm = 100, externalBpi, bundesland) {
     const hinweise = [];
     // 1. Gebäudetyp + Standardstufe bestimmen
     const typ = mapObjektunterart(objektunterart, istHaus);
@@ -259,8 +311,8 @@ export function calcGebaeudewertNHK(wohnflaeche, baujahr, objektunterart, aussta
     // 6. Vorlaeufiger Sachwert (vor MAF)
     const herstellungskosten = nhk2010 * bgf * bpiFaktor;
     const gebaeudewertVorMAF = Math.round(herstellungskosten * alterswertminderung);
-    // 7. Marktanpassungsfaktor (Anlage 25 BewG)
-    const maf = lookupMAF(gebaeudewertVorMAF, brwProQm);
+    // 7. Marktanpassungsfaktor (bevorzugt GMB-Daten, Fallback: Anlage 25 BewG)
+    const maf = lookupMAF(gebaeudewertVorMAF, brwProQm, bundesland);
     const gebaeudewert = Math.round(gebaeudewertVorMAF * maf);
     // 8. Hinweise
     if (gebaeudealter > gnd) {

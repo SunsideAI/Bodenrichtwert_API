@@ -25,11 +25,49 @@ const LIEGENSCHAFTSZINS = {
     efh: { min: 0.015, max: 0.040, default: 0.025 },
     zfh: { min: 0.020, max: 0.045, default: 0.030 },
 };
+// ─── GMB-Daten Loader (Liegenschaftszinssätze aus Grundstücksmarktberichten) ─
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+let _gmbLiZiCache = null;
+let _gmbLiZiLoaded = false;
+function loadGMBLiegenschaftszins() {
+    if (_gmbLiZiLoaded)
+        return _gmbLiZiCache;
+    _gmbLiZiLoaded = true;
+    try {
+        const filePath = join(import.meta.dirname ?? '.', '..', '..', 'data', 'gmb', 'liegenschaftszins.json');
+        if (!existsSync(filePath))
+            return null;
+        const data = JSON.parse(readFileSync(filePath, 'utf-8'));
+        if (data?.bundeslaender && Object.keys(data.bundeslaender).length > 0) {
+            _gmbLiZiCache = data;
+            return _gmbLiZiCache;
+        }
+    }
+    catch { /* Fallback auf hardcoded Werte */ }
+    return null;
+}
 /**
  * Leitet den Liegenschaftszins aus dem BRW-Niveau ab.
  * Höherer BRW → niedrigerer Zins (inverse Korrelation: teure Lagen = geringere Rendite).
+ *
+ * Priorität:
+ *   1. GMB-Daten (aus Grundstücksmarktberichten, wenn für Bundesland verfügbar)
+ *   2. BRW-basierte Interpolation (Fallback, hardcoded Ranges)
  */
-function deriveLiegenschaftszins(typ, brwProQm) {
+function deriveLiegenschaftszins(typ, brwProQm, bundesland) {
+    // 1. Versuch: GMB-Daten
+    if (bundesland) {
+        const gmb = loadGMBLiegenschaftszins();
+        if (gmb?.bundeslaender[bundesland]) {
+            const blData = gmb.bundeslaender[bundesland];
+            const match = blData.daten.find(d => d.teilmarkt === typ);
+            if (match && match.zins > 0) {
+                return Math.round(match.zins * 1000) / 1000;
+            }
+        }
+    }
+    // 2. Fallback: BRW-basierte Interpolation
     const range = LIEGENSCHAFTSZINS[typ] ?? LIEGENSCHAFTSZINS.mfh;
     // Lineare Interpolation: BRW 0 → max, BRW 500 → min
     const brwNorm = Math.min(Math.max(brwProQm, 0), 500) / 500;
@@ -91,7 +129,7 @@ function calcVervielfaeltiger(liegenschaftszins, restnutzungsdauer) {
  * @returns ErtragswertResult oder null wenn Berechnung nicht möglich
  */
 export function calcErtragswert(input) {
-    const { wohnflaeche, mietpreisProQm, bodenwert, brwProQm, baujahr, gebaeudTyp } = input;
+    const { wohnflaeche, mietpreisProQm, bodenwert, brwProQm, baujahr, gebaeudTyp, bundesland } = input;
     // Gate: Wir brauchen Mietpreis, Wohnfläche und Bodenwert
     if (!mietpreisProQm || mietpreisProQm <= 0)
         return null;
@@ -111,8 +149,8 @@ export function calcErtragswert(input) {
         hinweise.push('Reinertrag negativ. Bewirtschaftungskosten übersteigen Mieteinnahmen.');
         return null;
     }
-    // 4. Liegenschaftszins
-    const liegenschaftszins = deriveLiegenschaftszins(gebaeudTyp, brwProQm);
+    // 4. Liegenschaftszins (bevorzugt aus GMB-Daten, Fallback: BRW-Interpolation)
+    const liegenschaftszins = deriveLiegenschaftszins(gebaeudTyp, brwProQm, bundesland);
     // 5. Bodenwertverzinsung
     const bodenwertverzinsung = bodenwert * liegenschaftszins;
     // 6. Gebäudereinertrag

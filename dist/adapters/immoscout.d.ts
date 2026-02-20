@@ -11,9 +11,9 @@ import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
  * 3. _atlas_initialState JSON parsen → haus_kauf_preis
  * 4. Preisabhängigen Faktor anwenden → BRW-Schätzwert
  *
- * Die Umrechnung nutzt preisabhängige Faktoren:
- * - Teure Lagen (>6000 €/m²): ~55% Bodenanteil
- * - Günstige Lagen (<1500 €/m²): ~22% Bodenanteil
+ * Die Umrechnung nutzt eine stetige logarithmische Funktion:
+ *   faktor = 0.165 × ln(preis) − 0.935, begrenzt auf [0.15, 0.60]
+ * Beispiele: 1000 €/m² → ~22%, 3000 €/m² → ~38%, 7000 €/m² → ~53%
  */
 export declare class ImmoScoutAdapter implements BodenrichtwertAdapter {
     state: string;
@@ -29,6 +29,17 @@ export declare class ImmoScoutAdapter implements BodenrichtwertAdapter {
     /**
      * Schätzt den Bodenrichtwert basierend auf dem Hauspreis.
      * Höhere Immobilienpreise → höherer Bodenanteil.
+     *
+     * Stetige logarithmische Funktion statt harter Stufen.
+     * Kalibriert an empirischen Stützpunkten:
+     *   1000 €/m² → ~22% Bodenanteil (ländlich)
+     *   2000 €/m² → ~30% (Kleinstadt)
+     *   3250 €/m² → ~38% (Suburban)
+     *   5000 €/m² → ~46% (Urban)
+     *   7000 €/m² → ~53% (Premium)
+     *
+     * Formel: faktor = 0.165 × ln(preis) − 0.935
+     * Grenzen: [0.15, 0.60] — ländlicher Mindestwert / Luxus-Obergrenze
      */
     private estimateBRW;
     healthCheck(): Promise<boolean>;
