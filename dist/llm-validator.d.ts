@@ -25,6 +25,17 @@ export interface ValidationResult {
  * - Deaktivierbar: Ohne ANTHROPIC_API_KEY wird sofort "deaktiviert" zurückgegeben
  */
 export declare function validateBewertung(input: BewertungInput, bewertung: Bewertung, brw: NormalizedBRW | null, adresse: string, bundesland: string): Promise<ValidationResult>;
+/**
+ * Wendet die LLM-Validierung als Korrektur auf die Bewertung an.
+ *
+ * Korrektur-Logik (graduiert, nicht blind übernehmen):
+ *   - plausibel / fehler / deaktiviert → keine Änderung
+ *   - auffaellig (10-25%) + confidence ≥ 0.7 + empfohlener_wert → 30% Blend
+ *   - unplausibel (>25%) + confidence ≥ 0.75 + empfohlener_wert → 50% Blend
+ *
+ * Gibt eine korrigierte Kopie zurück (Original bleibt unverändert).
+ */
+export declare function applyLLMCorrection(bewertung: Bewertung, validation: ValidationResult): Bewertung;
 export declare function clearValidationCache(): number;
 export declare function validationCacheStats(): {
     size: number;
