@@ -4,3 +4,4 @@ data/cache.sqlite-wal
 data/cache.sqlite-shm
 .env
 *.log
+data/gmb/pdfs/
