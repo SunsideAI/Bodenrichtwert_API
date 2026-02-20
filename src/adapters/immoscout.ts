@@ -1,5 +1,5 @@
 import type { BodenrichtwertAdapter, NormalizedBRW } from './base.js';
-import { scrapeImmoScoutAtlas, slugify, ATLAS_BASE } from '../utils/immoscout-scraper.js';
+import { scrapeImmoScoutAtlas, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify, ATLAS_BASE } from '../utils/immoscout-scraper.js';
 
 const NOMINATIM_URL = process.env.NOMINATIM_URL || 'https://nominatim.openstreetmap.org';
 
@@ -65,6 +65,19 @@ export class ImmoScoutAdapter implements BodenrichtwertAdapter {
       prices = await scrapeImmoScoutAtlas(location.bundeslandSlug, landkreisSlug);
       if (prices) {
         datenquelle = `${location.county} (Landkreis-Atlas)`;
+      }
+    }
+
+    // Fallback 3: IS24 Mobile Search (breitere Suche über Landkreis)
+    if (!prices) {
+      console.log(`${this.stateCode} ImmoScout: Atlas erschöpft, versuche IS24 Mobile Search für ${location.stadt}...`);
+      const kreisSlug = location.county ? buildSearchKreisSlug(location.county) : undefined;
+      const searchPrices = await scrapeImmoScoutSearch(
+        location.bundeslandSlug, kreisSlug, location.stadtSlug, location.stadt,
+      );
+      if (searchPrices) {
+        prices = searchPrices;
+        datenquelle = `${searchPrices.stadt || location.stadt} (IS24-Suche)`;
       }
     }
 
