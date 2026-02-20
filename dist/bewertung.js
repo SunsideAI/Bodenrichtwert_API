@@ -332,6 +332,13 @@ function calcAdjustedQmPreis(median, min, max, faktorenGesamt) {
     const adjMin = min != null ? min * ANGEBOTSPREIS_ABSCHLAG : null;
     const adjMax = max != null ? max * ANGEBOTSPREIS_ABSCHLAG : null;
     if (adjMin != null && adjMax != null && adjMin < adjMedian && adjMax > adjMedian) {
+        // Wide-spread detection: Wenn der Min/Max-Bereich >120% des Medians ist,
+        // stammen die Daten aus einer breiten IS24-Suche (VVG/Landkreis-Level).
+        // Min/Max sind dann nicht für einzelne Objekte repräsentativ.
+        const rangeWidth = (adjMax - adjMin) / adjMedian;
+        if (rangeWidth > 1.2) {
+            return Math.max(adjMedian * (1 + faktorenGesamt), adjMedian * 0.25);
+        }
         const tRaw = faktorenGesamt / SCALE; // unbounded
         const t = Math.max(-1, Math.min(1, tRaw));
         let price;
