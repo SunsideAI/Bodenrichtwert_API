@@ -463,28 +463,53 @@ function mapToErtragswertTyp(art, objektunterart) {
         return 'zfh';
     return 'efh';
 }
-function determineConfidenceAndSpread(brw, methode, hasErtragswert) {
-    // Marktpreis-Indikation: basiert auf Stadtdurchschnitt → inhärente Unsicherheit ±15%
+function determineConfidenceAndSpread(brw, methode, hasErtragswert, ewDivergenz) {
+    let konfidenz;
+    let spread;
     if (methode === 'marktpreis-indikation') {
-        return { konfidenz: 'mittel', spread: 0.15 };
+        konfidenz = 'mittel';
+        spread = 0.15;
     }
-    // Vergleichswertverfahren (ImmoWertV § 15): direkte Marktpreise für ETW/Wohnungen
-    if (methode === 'vergleichswert') {
-        if (brw?.schaetzung)
-            return { konfidenz: 'mittel', spread: 0.12 };
-        if (hasErtragswert)
-            return { konfidenz: 'hoch', spread: 0.06 };
-        return { konfidenz: 'hoch', spread: 0.10 };
+    else if (methode === 'vergleichswert') {
+        if (brw?.schaetzung) {
+            konfidenz = 'mittel';
+            spread = 0.12;
+        }
+        else if (hasErtragswert) {
+            konfidenz = 'hoch';
+            spread = 0.06;
+        }
+        else {
+            konfidenz = 'hoch';
+            spread = 0.10;
+        }
     }
-    // Sachwert-lite: BRW-Qualität bestimmt die Konfidenz
-    if (!brw || brw.wert <= 0)
-        return { konfidenz: 'gering', spread: 0.20 };
-    if (brw.schaetzung)
-        return { konfidenz: 'mittel', spread: 0.15 };
-    // Ertragswert als Cross-Validation erhöht die Konfidenz weiter
-    if (hasErtragswert)
-        return { konfidenz: 'hoch', spread: 0.06 };
-    return { konfidenz: 'hoch', spread: 0.08 };
+    else {
+        if (!brw || brw.wert <= 0) {
+            konfidenz = 'gering';
+            spread = 0.20;
+        }
+        else if (brw.schaetzung) {
+            konfidenz = 'mittel';
+            spread = 0.15;
+        }
+        else if (hasErtragswert) {
+            konfidenz = 'hoch';
+            spread = 0.06;
+        }
+        else {
+            konfidenz = 'hoch';
+            spread = 0.08;
+        }
+    }
+    // Methoden-Divergenz senkt die Konfidenz
+    if (ewDivergenz != null && ewDivergenz > 0.30) {
+        if (konfidenz === 'hoch')
+            konfidenz = 'mittel';
+        const divergenceBonus = Math.min(0.10, (ewDivergenz - 0.30) * 0.20);
+        spread = Math.min(0.25, spread + divergenceBonus);
+    }
+    return { konfidenz, spread };
 }
 // ─── Hauptfunktion ───────────────────────────────────────────────────────────
 export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreisindex, bundesland) {
@@ -585,6 +610,7 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
     let gebaeudewert = 0;
     let realistischerImmobilienwert = 0;
     let ertragswertErgebnis = null;
+    let is24Gesamtwert = null;
     const hinweise = [...validationHinweise];
     const datenquellen = [];
     // Lage-Cluster Info
@@ -683,7 +709,7 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
         if (marktPreisProQm) {
             // IS24-basierten Vergleichswert berechnen
             const adjustedQmPreisSachwert = calcAdjustedQmPreis(marktPreisProQm, marktPreisMin, marktPreisMax, faktoren.gesamt, angebotspreisAbschlag);
-            const is24Gesamtwert = Math.round(adjustedQmPreisSachwert * wohnflaeche);
+            is24Gesamtwert = Math.round(adjustedQmPreisSachwert * wohnflaeche);
             // Gewichtung nach Datengranularität
             const hatStadtteil = !!marktdaten?.stadtteil;
             let nhkWeight = hatStadtteil ? 0.40 : 0.60;
@@ -785,6 +811,31 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
                 }
             }
         }
+        // ─── Ertragswert-dominanter 3-Methoden-Blend ──────────────────────────
+        // "2 aus 3 stimmen überein"-Prinzip:
+        //   Guard: EW und IS24 stimmen überein (<20% Divergenz)
+        //          ABER beide weichen >25% vom Sachwert-Blend ab
+        //   → Sachwert-Blend wird durch 50% EW + 30% IS24 + 20% SW ersetzt
+        if (ertragswertErgebnis != null && ertragswertErgebnis > 0 &&
+            is24Gesamtwert != null && is24Gesamtwert > 0) {
+            const ewIs24Div = Math.abs(ertragswertErgebnis - is24Gesamtwert)
+                / Math.max(ertragswertErgebnis, is24Gesamtwert);
+            const ewSwDiv = Math.abs(ertragswertErgebnis - realistischerImmobilienwert)
+                / Math.max(ertragswertErgebnis, realistischerImmobilienwert);
+            const is24SwDiv = Math.abs(is24Gesamtwert - realistischerImmobilienwert)
+                / Math.max(is24Gesamtwert, realistischerImmobilienwert);
+            if (ewIs24Div < 0.20 && ewSwDiv > 0.25 && is24SwDiv > 0.25) {
+                const vorher = realistischerImmobilienwert;
+                realistischerImmobilienwert = Math.round(ertragswertErgebnis * 0.50 + is24Gesamtwert * 0.30 + vorher * 0.20);
+                gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+                hinweise.push(`3-Methoden-Blend: EW (${ertragswertErgebnis.toLocaleString('de-DE')} €) und IS24 `
+                    + `(${is24Gesamtwert.toLocaleString('de-DE')} €) stimmen überein `
+                    + `(${Math.round(ewIs24Div * 100)}% Divergenz), weichen aber `
+                    + `${Math.round(ewSwDiv * 100)}% vom Sachwert ab. `
+                    + `Korrektur: ${vorher.toLocaleString('de-DE')} → `
+                    + `${realistischerImmobilienwert.toLocaleString('de-DE')} € (50/30/20).`);
+            }
+        }
     }
     else {
         // ─── Marktpreis-Indikation / Bundesdurchschnitt-Fallback ───
@@ -841,7 +892,11 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
         spread = 0.12;
     }
     else {
-        const cs = determineConfidenceAndSpread(brw, bewertungsmethode, ertragswertErgebnis != null);
+        const ewDivForConf = (ertragswertErgebnis != null && ertragswertErgebnis > 0)
+            ? Math.abs(realistischerImmobilienwert - ertragswertErgebnis)
+                / Math.max(realistischerImmobilienwert, ertragswertErgebnis)
+            : null;
+        const cs = determineConfidenceAndSpread(brw, bewertungsmethode, ertragswertErgebnis != null, ewDivForConf);
         konfidenz = cs.konfidenz;
         spread = cs.spread;
     }
@@ -920,7 +975,7 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
             const ewAbweichung = (realistischerImmobilienwert - ertragswertErgebnis) / ertragswertErgebnis;
             if (Math.abs(ewAbweichung) > 0.25) {
                 // Graduierte Korrektur: stärkere Divergenz → stärkerer Pull zum Ertragswert (max 40%)
-                const pullStrength = Math.min(0.40, 0.25 + (Math.abs(ewAbweichung) - 0.25) * 0.30);
+                const pullStrength = Math.min(0.55, 0.25 + (Math.abs(ewAbweichung) - 0.25) * 0.50);
                 const korrigiert = Math.round(realistischerImmobilienwert * (1 - pullStrength) + ertragswertErgebnis * pullStrength);
                 hinweise.push(`Plausibilitätskorrektur: Sachwert weicht ${Math.round(ewAbweichung * 100)}% vom Ertragswert ab. Wert um ${Math.round(Math.abs(korrigiert - realistischerImmobilienwert) / 1000)}T€ korrigiert.`);
                 realistischerImmobilienwert = korrigiert;

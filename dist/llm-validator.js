@@ -249,7 +249,16 @@ export function applyLLMCorrection(bewertung, validation) {
         return bewertung;
     }
     // Blend-Stärke: wie stark ziehen wir zum LLM-Wert?
-    const blendWeight = validation.status === 'unplausibel' ? 0.50 : 0.30;
+    // Graduiert nach Confidence: höhere Confidence → stärkerer Pull
+    let blendWeight;
+    if (validation.status === 'unplausibel') {
+        // 0.50 (bei conf=0.75) → 0.65 (bei conf≈1.0)
+        blendWeight = Math.min(0.65, 0.50 + (validation.confidence - 0.75) * 0.60);
+    }
+    else {
+        // auffällig: 0.30 (bei conf=0.70) → 0.45 (bei conf≈1.0)
+        blendWeight = Math.min(0.45, 0.30 + (validation.confidence - 0.70) * 0.50);
+    }
     const originalWert = bewertung.realistischer_immobilienwert;
     const llmWert = validation.empfohlener_wert;
     // Sanity-Check: LLM-Wert muss zwischen 20% und 500% des Originals liegen
