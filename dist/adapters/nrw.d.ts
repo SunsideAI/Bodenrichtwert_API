@@ -24,6 +24,7 @@ export declare class NRWAdapter implements BodenrichtwertAdapter {
     private parseXmlResponse;
     private parseHtmlResponse;
     private extractNumberFromXml;
+    private parseGermanNumber;
     private extractFieldFromXml;
     healthCheck(): Promise<boolean>;
 }
