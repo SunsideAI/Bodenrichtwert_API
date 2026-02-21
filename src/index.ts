@@ -31,6 +31,9 @@ app.use('*', cors());
 const token = process.env.API_TOKEN;
 if (token) {
   app.use('/api/enrich', bearerAuth({ token }));
+  console.log(`Auth enabled: API_TOKEN set (${token.length} chars, starts with "${token.substring(0, 4)}...")`);
+} else {
+  console.warn('⚠ AUTH DISABLED: No API_TOKEN environment variable set!');
 }
 
 // ==========================================
