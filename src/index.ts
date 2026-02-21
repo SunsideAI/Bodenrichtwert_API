@@ -430,6 +430,9 @@ async function maybeEnrichWithResearch(
  *
  * Wird NACH allen Korrekturschleifen (Plausibilität + LLM-Validierung)
  * aus den finalen Werten gebaut → immer konsistent.
+ *
+ * Alle Felder sind IMMER vorhanden (ggf. mit Fallback-Werten),
+ * damit Zapier → PDFMonkey kein Mapping-Fehler bekommt.
  */
 function buildBericht(
   bewertung: Bewertung,
@@ -448,9 +451,10 @@ function buildBericht(
       ausstattung: string | null;
     };
   },
-  brwWert: number | null,
+  brw: NormalizedBRW | null,
   geo: { city: string; state: string; district?: string; county?: string },
   marktdaten: ReturnType<typeof formatMarktdaten> | null,
+  body: Record<string, any>,
 ): Record<string, string | number | null> {
   // ─── BKI_Ampelklasse: konfidenz → Farbcode für den Bericht ───
   const ampelMap: Record<string, string> = {
@@ -459,7 +463,7 @@ function buildBericht(
     gering: 'rot',
   };
 
-  // ─── Modernisierung: lesbarer Text ───
+  // ─── Score → lesbarer Text (Modernisierung, Energie, Ausstattung) ───
   const modScoreLabels: Record<string, string> = {
     '5': 'Kernsanierung / Neuwertig',
     '4': 'Umfassend modernisiert',
@@ -467,12 +471,6 @@ function buildBericht(
     '2': 'Nur einzelne Maßnahmen',
     '1': 'Keine Modernisierungen',
   };
-  const rawMod = inputEcho.bewertungsparameter.modernisierung;
-  const modernisierungLabel = rawMod
-    ? (modScoreLabels[rawMod.trim()] ?? rawMod)
-    : 'Nicht angegeben';
-
-  // ─── Energie: lesbarer Text ───
   const energieScoreLabels: Record<string, string> = {
     '5': 'Sehr gut',
     '4': 'Gut',
@@ -480,22 +478,29 @@ function buildBericht(
     '2': 'Eher schlecht',
     '1': 'Sehr schlecht',
   };
-  const rawEnergie = inputEcho.bewertungsparameter.energie;
-  const energieLabel = rawEnergie
-    ? (energieScoreLabels[rawEnergie.trim()] ?? rawEnergie)
-    : 'Nicht angegeben';
+  const ausstattungScoreLabels: Record<string, string> = {
+    '5': 'Stark gehoben',
+    '4': 'Gehoben',
+    '3': 'Mittel',
+    '2': 'Einfach',
+    '1': 'Schlecht',
+  };
+
+  function scoreToLabel(raw: string | null, labels: Record<string, string>): string {
+    if (!raw) return 'Nicht angegeben';
+    return labels[raw.trim()] ?? raw;
+  }
 
   // ─── Standortbeschreibung: Lage als Fließtext ───
-  const parts: string[] = [];
-  if (geo.district) parts.push(geo.district);
-  parts.push(geo.city);
+  const locationParts: string[] = [];
+  if (geo.district) locationParts.push(geo.district);
+  locationParts.push(geo.city);
   if (geo.county && !geo.county.toLowerCase().includes(geo.city.toLowerCase())) {
-    parts.push(geo.county);
+    locationParts.push(geo.county);
   }
-  parts.push(geo.state);
-  let standort = parts.join(', ');
+  locationParts.push(geo.state);
+  let standort = locationParts.join(', ');
 
-  // Marktdaten-Kontext ergänzen
   if (marktdaten) {
     const quelle = marktdaten.stadtteil
       ? `Stadtteil-Marktdaten (${marktdaten.stadtteil})`
@@ -503,32 +508,62 @@ function buildBericht(
     standort += `. Marktdaten: ${quelle}, Stand ${marktdaten.datenstand}.`;
   }
 
+  // ─── Bodenrichtwert Confidence als lesbarer Text ───
+  const brwConfidenceLabel = !brw ? 'Nicht verfügbar'
+    : brw.quelle.includes('KI-Recherche') ? 'KI-Recherche (geschätzt)'
+    : brw.schaetzung ? 'Schätzwert (ImmoScout-basiert)'
+    : 'Offiziell (BORIS)';
+
   return {
-    // Preise pro m²
+    // ─── Adresse ───
+    Strasse: body.strasse || '',
+    PLZ: body.plz || '',
+    Ort: body.ort || geo.city,
+    Bundesland: geo.state,
+    Stadtteil: geo.district || '',
+
+    // ─── Standort ───
+    Standortbeschreibung: standort,
+
+    // ─── Immobilienbeschreibung ───
+    Immobilienart: inputEcho.bewertungsparameter.art || 'Nicht angegeben',
+    Objektunterart: inputEcho.bewertungsparameter.objektunterart || 'Nicht angegeben',
+    Baujahr: inputEcho.bewertungsparameter.baujahr,
+    Wohnflaeche: inputEcho.bewertungsparameter.wohnflaeche,
+    Grundstuecksflaeche: inputEcho.bewertungsparameter.grundstuecksflaeche,
+    Modernisierung: scoreToLabel(inputEcho.bewertungsparameter.modernisierung, modScoreLabels),
+    Energie: scoreToLabel(inputEcho.bewertungsparameter.energie, energieScoreLabels),
+    Ausstattung: scoreToLabel(inputEcho.bewertungsparameter.ausstattung, ausstattungScoreLabels),
+
+    // ─── Preise pro m² ───
     Preis_qm: bewertung.realistischer_qm_preis,
     QMSpanne_Untergrenze: bewertung.qm_preis_spanne.min,
     QMSpanne_Mittelwert: bewertung.realistischer_qm_preis,
     QMSpanne_Obergrenze: bewertung.qm_preis_spanne.max,
 
-    // Gesamtpreise
+    // ─── Gesamtpreise ───
     Preis: bewertung.realistischer_immobilienwert,
     Spanne_Untergrenze: bewertung.immobilienwert_spanne.min,
     Spanne_Mittelwert: bewertung.realistischer_immobilienwert,
     Spanne_Obergrenze: bewertung.immobilienwert_spanne.max,
 
-    // Objekteigenschaften
-    Modernisierung: modernisierungLabel,
-    Energie: energieLabel,
-    Objektunterart: inputEcho.bewertungsparameter.objektunterart || 'Nicht angegeben',
+    // ─── Wertkomponenten ───
+    Bodenwert: bewertung.bodenwert,
+    Gebaeudewert: bewertung.gebaeudewert,
+    Ertragswert: bewertung.ertragswert,
 
-    // Qualitäts-Ampel
+    // ─── Bodenrichtwert-Details ───
+    Bodenrichtwert: brw?.wert ?? 0,
+    Bodenrichtwert_Stichtag: brw?.stichtag || '',
+    Bodenrichtwert_Zone: brw?.zone || '',
+    Bodenrichtwert_Nutzungsart: brw?.nutzungsart || '',
+    Bodenrichtwert_Quelle: brw?.quelle || '',
+    Bodenrichtwert_Confidence: brwConfidenceLabel,
+
+    // ─── Bewertungsqualität ───
     BKI_Ampelklasse: ampelMap[bewertung.konfidenz] ?? 'gelb',
-
-    // Bodenrichtwert
-    Bodenrichtwert: brwWert ?? 0,
-
-    // Standort
-    Standortbeschreibung: standort,
+    Konfidenz: bewertung.konfidenz,
+    Bewertungsmethode: bewertung.bewertungsmethode,
   };
 }
 
@@ -615,7 +650,7 @@ app.post('/api/enrich', async (c) => {
       const validation = await validateBewertung(bewertungInput, rawBewertung, cached, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
       const fmtMarkt = marktdaten ? formatMarktdaten(marktdaten) : null;
-      const bericht = buildBericht(bewertung, inputEcho, cached.wert, geo, fmtMarkt);
+      const bericht = buildBericht(bewertung, inputEcho, cached, geo, fmtMarkt, body);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'success',
@@ -647,7 +682,7 @@ app.post('/api/enrich', async (c) => {
       const validation = await validateBewertung(bewertungInput, rawBewertung, enrichedBrw, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
       const fmtMarkt = enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null;
-      const bericht = buildBericht(bewertung, inputEcho, enrichedBrw?.wert ?? null, geo, fmtMarkt);
+      const bericht = buildBericht(bewertung, inputEcho, enrichedBrw, geo, fmtMarkt, body);
       const elapsed = Date.now() - start;
       return c.json({
         status: enrichedBrw ? 'success' : 'manual_required',
@@ -692,7 +727,7 @@ app.post('/api/enrich', async (c) => {
       const validation = await validateBewertung(bewertungInput, rawBewertung, enrichedBrw, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
       const fmtMarkt = enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null;
-      const bericht = buildBericht(bewertung, inputEcho, enrichedBrw?.wert ?? null, geo, fmtMarkt);
+      const bericht = buildBericht(bewertung, inputEcho, enrichedBrw, geo, fmtMarkt, body);
       return c.json({
         status: enrichedBrw ? 'success' : 'not_found',
         input_echo: inputEcho,
@@ -729,7 +764,7 @@ app.post('/api/enrich', async (c) => {
     const validation = await validateBewertung(bewertungInput, rawBewertung, brw, adressString, geo.state);
     const bewertung = applyLLMCorrection(rawBewertung, validation);
     const fmtMarkt = finalMarktdaten ? formatMarktdaten(finalMarktdaten) : null;
-    const bericht = buildBericht(bewertung, inputEcho, brw.wert, geo, fmtMarkt);
+    const bericht = buildBericht(bewertung, inputEcho, brw, geo, fmtMarkt, body);
 
     return c.json({
       status: 'success',
