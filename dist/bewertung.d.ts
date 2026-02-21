@@ -27,6 +27,8 @@ export interface BewertungInput {
     modernisierung: string | null;
     energie: string | null;
     ausstattung: string | null;
+    /** Gebäudezustand 1–5: 1=Sanierungsbedarf … 5=Neuwertig. Fallback für modernisierung. */
+    zustand: string | null;
 }
 export interface BewertungFaktoren {
     baujahr: number;

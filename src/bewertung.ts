@@ -22,6 +22,7 @@ import { calcGebaeudewertNHK } from './utils/nhk.js';
 import type { NRWImmobilienrichtwert } from './utils/nrw-irw.js';
 import { calcErtragswert } from './utils/ertragswert.js';
 import type { BaupreisindexResult } from './utils/destatis.js';
+import { parseZustandScore, ZUSTAND_LABELS } from './types/index.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -34,6 +35,8 @@ export interface BewertungInput {
   modernisierung: string | null;
   energie: string | null;
   ausstattung: string | null;
+  /** Gebäudezustand 1–5: 1=Sanierungsbedarf … 5=Neuwertig. Fallback für modernisierung. */
+  zustand: string | null;
 }
 
 export interface BewertungFaktoren {
@@ -629,10 +632,22 @@ export function buildBewertung(
   let grundflaeche = input.grundstuecksflaeche || 0;
   let grundflaecheGeschaetzt = false;
 
+  // ─── Zustand-Fallback für Modernisierung ────────────────────────────────────
+  // Wenn modernisierung nicht angegeben ist, dient der Gebäudezustand (1–5) als Proxy.
+  // Beide Felder teilen die gleiche Score-Skala (1=schlechtester, 5=bester Zustand).
+  const zustandScore = parseZustandScore(input.zustand);
+  let effectiveModernisierung = input.modernisierung;
+  if (effectiveModernisierung == null && zustandScore != null) {
+    effectiveModernisierung = String(zustandScore);
+    validationHinweise.push(
+      `Gebäudezustand "${ZUSTAND_LABELS[zustandScore]}" (Score ${zustandScore}) als Modernisierungs-Proxy verwendet.`,
+    );
+  }
+
   // Faktoren berechnen
   const faktoren: BewertungFaktoren = {
     baujahr: calcBaujahrFaktor(input.baujahr, lageCluster),
-    modernisierung: calcModernisierungFaktor(input.modernisierung, input.baujahr, lageCluster),
+    modernisierung: calcModernisierungFaktor(effectiveModernisierung, input.baujahr, lageCluster),
     energie: calcEnergieFaktor(input.energie),
     ausstattung: calcAusstattungFaktor(input.ausstattung),
     objektunterart: calcObjektunterartFaktor(input.objektunterart),
@@ -792,7 +807,7 @@ export function buildBewertung(
 
     const nhk = calcGebaeudewertNHK(
       wohnflaeche, input.baujahr,
-      input.objektunterart, input.ausstattung, input.modernisierung,
+      input.objektunterart, input.ausstattung, effectiveModernisierung,
       istHaus, brw!.wert, externalBpi, bundesland,
     );
     const nhkSachwert = bodenwert + nhk.gebaeudewert;

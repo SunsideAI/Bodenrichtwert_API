@@ -16,6 +16,7 @@
 import { calcIndexKorrektur } from './utils/bundesbank.js';
 import { calcGebaeudewertNHK } from './utils/nhk.js';
 import { calcErtragswert } from './utils/ertragswert.js';
+import { parseZustandScore, ZUSTAND_LABELS } from './types/index.js';
 function determineLageCluster(brw, marktPreisProQm) {
     const brwWert = brw?.wert ?? 0;
     const preis = marktPreisProQm ?? 0;
@@ -561,10 +562,19 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
     // ─── Grundfläche: verwende Original oder schätze (NUR für Häuser) ───────────
     let grundflaeche = input.grundstuecksflaeche || 0;
     let grundflaecheGeschaetzt = false;
+    // ─── Zustand-Fallback für Modernisierung ────────────────────────────────────
+    // Wenn modernisierung nicht angegeben ist, dient der Gebäudezustand (1–5) als Proxy.
+    // Beide Felder teilen die gleiche Score-Skala (1=schlechtester, 5=bester Zustand).
+    const zustandScore = parseZustandScore(input.zustand);
+    let effectiveModernisierung = input.modernisierung;
+    if (effectiveModernisierung == null && zustandScore != null) {
+        effectiveModernisierung = String(zustandScore);
+        validationHinweise.push(`Gebäudezustand "${ZUSTAND_LABELS[zustandScore]}" (Score ${zustandScore}) als Modernisierungs-Proxy verwendet.`);
+    }
     // Faktoren berechnen
     const faktoren = {
         baujahr: calcBaujahrFaktor(input.baujahr, lageCluster),
-        modernisierung: calcModernisierungFaktor(input.modernisierung, input.baujahr, lageCluster),
+        modernisierung: calcModernisierungFaktor(effectiveModernisierung, input.baujahr, lageCluster),
         energie: calcEnergieFaktor(input.energie),
         ausstattung: calcAusstattungFaktor(input.ausstattung),
         objektunterart: calcObjektunterartFaktor(input.objektunterart),
@@ -700,7 +710,7 @@ export function buildBewertung(input, brw, marktdaten, preisindex, irw, baupreis
             stand: baupreisindex.stand,
             quelle: baupreisindex.quelle,
         } : null;
-        const nhk = calcGebaeudewertNHK(wohnflaeche, input.baujahr, input.objektunterart, input.ausstattung, input.modernisierung, istHaus, brw.wert, externalBpi, bundesland);
+        const nhk = calcGebaeudewertNHK(wohnflaeche, input.baujahr, input.objektunterart, input.ausstattung, effectiveModernisierung, istHaus, brw.wert, externalBpi, bundesland);
         const nhkSachwert = bodenwert + nhk.gebaeudewert;
         datenquellen.push('BORIS/WFS Bodenrichtwert', 'NHK 2010 (ImmoWertV 2022)');
         if (baupreisindex?.quelle === 'Destatis Genesis 61261-0002') {
