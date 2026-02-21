@@ -314,17 +314,30 @@ function parseHtmlResponse(html: string): NRWImmobilienrichtwert[] {
 
 // ─── XML-Hilfsfunktionen ────────────────────────────────────────────────────
 
+function parseGermanNumber(numStr: string): number | null {
+  if (numStr.includes(',')) {
+    numStr = numStr.replace(/\./g, '').replace(',', '.');
+  }
+  const val = parseFloat(numStr);
+  return (val > 0 && isFinite(val)) ? val : null;
+}
+
 function extractNumberFromXml(xml: string, fields: string[]): number | null {
   for (const field of fields) {
-    const re = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([\\d.,]+)<`, 'i');
-    const match = xml.match(re);
-    if (match) {
-      let numStr = match[1];
-      if (numStr.includes(',')) {
-        numStr = numStr.replace(/\./g, '').replace(',', '.');
-      }
-      const val = parseFloat(numStr);
-      if (val > 0 && isFinite(val)) return val;
+    // 1) Element-Content: <IRW>630</IRW> oder <ns:IRW>630</ns:IRW>
+    const tagRe = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([\\d.,]+)<`, 'i');
+    const tagMatch = xml.match(tagRe);
+    if (tagMatch) {
+      const val = parseGermanNumber(tagMatch[1]);
+      if (val !== null) return val;
+    }
+
+    // 2) Attribut-Format: IRW="630" (NRW FIELDS-Style)
+    const attrRe = new RegExp(`\\b${field}="([\\d.,]+)"`, 'i');
+    const attrMatch = xml.match(attrRe);
+    if (attrMatch) {
+      const val = parseGermanNumber(attrMatch[1]);
+      if (val !== null) return val;
     }
   }
   return null;
@@ -332,9 +345,15 @@ function extractNumberFromXml(xml: string, fields: string[]): number | null {
 
 function extractFieldFromXml(xml: string, fields: string[]): string | null {
   for (const field of fields) {
-    const re = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
-    const match = xml.match(re);
-    if (match) return match[1].trim();
+    // 1) Element-Content: <Stichtag>2024-01-01</Stichtag>
+    const tagRe = new RegExp(`<(?:[a-zA-Z0-9_]+:)?${field}(?:\\s[^>]*)?>([^<]+)<`, 'i');
+    const tagMatch = xml.match(tagRe);
+    if (tagMatch) return tagMatch[1].trim();
+
+    // 2) Attribut-Format: Stichtag="01.01.2024" (NRW FIELDS-Style)
+    const attrRe = new RegExp(`\\b${field}="([^"]*)"`, 'i');
+    const attrMatch = xml.match(attrRe);
+    if (attrMatch && attrMatch[1].trim()) return attrMatch[1].trim();
   }
   return null;
 }
