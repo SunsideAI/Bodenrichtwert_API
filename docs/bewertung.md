@@ -1,14 +1,17 @@
 # Bewertungsmethodik
 
-Technische Dokumentation des Bewertungsmoduls (`src/bewertung.ts`).
+Technische Dokumentation des Bewertungsmoduls (`src/bewertung.ts`) und der KI-Validierungsschicht (`src/llm-validator.ts`).
 
-Das Modul liefert das `bewertung`-Feld in der API-Response von `POST /api/enrich`. Es kombiniert bis zu 5 Datenquellen:
+Das Modul liefert die Felder `bewertung` und `validation` in der API-Response von `POST /api/enrich`. Es kombiniert bis zu 7 Datenquellen:
 
 - **Bodenrichtwerte** (BORIS/WFS) — offiziell oder geschätzt
 - **ImmoScout24 Atlas** — Marktpreise auf Stadt- oder Stadtteil-Ebene
 - **NHK 2010** (ImmoWertV 2022 Anlage 4) — Normalherstellungskosten für den Gebäudewert
+- **Ertragswertverfahren** (ImmoWertV §§ 27-34) — Renditewert als Cross-Validation
 - **Bundesbank Wohnimmobilienpreisindex** — indexbasierte Stichtag-Korrektur
+- **Destatis Baupreisindex** — Baukosten-Hochrechnung von 2010 auf heute
 - **BORIS-NRW Immobilienrichtwerte** — amtliche Vergleichswerte (nur NRW)
+- **KI-Validierung** (Claude Sonnet) — LLM-basierte Plausibilitätsprüfung + Auto-Korrektur
 
 ---
 
@@ -17,18 +20,24 @@ Das Modul liefert das `bewertung`-Feld in der API-Response von `POST /api/enrich
 1. [Eingabeparameter](#1-eingabeparameter)
 2. [Input-Validierung](#2-input-validierung)
 3. [Gate-Checks](#3-gate-checks)
-4. [Methodenwahl](#4-methodenwahl)
-5. [Korrekturfaktoren](#5-korrekturfaktoren)
-6. [Overlap-Korrekturen](#6-overlap-korrekturen)
-7. [Berechnungsformeln](#7-berechnungsformeln)
-8. [NHK 2010 Gebäudewert](#8-nhk-2010-gebäudewert)
-9. [Stichtag-Korrektur (Bundesbank)](#9-stichtag-korrektur-bundesbank)
-10. [Stadtteil-Marktdaten](#10-stadtteil-marktdaten)
-11. [Konfidenz & Spanne](#11-konfidenz--spanne)
-12. [Cross-Validation](#12-cross-validation)
-13. [NRW Immobilienrichtwerte](#13-nrw-immobilienrichtwerte)
-14. [Hinweise-System](#14-hinweise-system)
-15. [Ausgabeformat](#15-ausgabeformat)
+4. [Lage-Cluster](#4-lage-cluster)
+5. [Methodenwahl](#5-methodenwahl)
+6. [Korrekturfaktoren](#6-korrekturfaktoren)
+7. [Overlap-Korrekturen](#7-overlap-korrekturen)
+8. [Berechnungsformeln](#8-berechnungsformeln)
+9. [NHK 2010 Gebäudewert](#9-nhk-2010-gebäudewert)
+10. [NHK-IS24 Blend (Sachwert-lite)](#10-nhk-is24-blend-sachwert-lite)
+11. [Ertragswertverfahren](#11-ertragswertverfahren)
+12. [Stichtag-Korrektur (Bundesbank)](#12-stichtag-korrektur-bundesbank)
+13. [Stadtteil-Marktdaten](#13-stadtteil-marktdaten)
+14. [Konfidenz & Spanne](#14-konfidenz--spanne)
+15. [Plausibilitätsprüfung (4-Signal)](#15-plausibilitätsprüfung-4-signal)
+16. [KI-Validierung (LLM)](#16-ki-validierung-llm)
+17. [KI-Auto-Korrektur](#17-ki-auto-korrektur)
+18. [Cross-Validation](#18-cross-validation)
+19. [NRW Immobilienrichtwerte](#19-nrw-immobilienrichtwerte)
+20. [Hinweise-System](#20-hinweise-system)
+21. [Ausgabeformat](#21-ausgabeformat)
 
 ---
 
@@ -47,7 +56,7 @@ Die Bewertung wird aus dem `BewertungInput`-Objekt berechnet, das aus dem Reques
 | `energie` | `string \| null` | Nein | Energieeffizienz (Text oder Score 1–5) | `"Gut"` oder `"4"` |
 | `ausstattung` | `string \| null` | Nein | Ausstattungsniveau (Text oder Score 1–5) | `"Gehoben"` oder `"4"` |
 
-\* Ohne `grundstuecksflaeche` kann die Methode `sachwert-lite` nicht verwendet werden.
+\* Ohne `grundstuecksflaeche` wird sie aus Objekttyp geschätzt oder die Methode fällt auf `marktpreis-indikation` zurück.
 
 ### Numerische Scores (1–5)
 
@@ -77,13 +86,32 @@ Die Bewertung gibt `null` zurück wenn:
 
 ---
 
-## 4. Methodenwahl
+## 4. Lage-Cluster
+
+Korrekturfaktoren werden nach Lagequalität regionalisiert. Das System ordnet jede Adresse einem von drei Clustern zu:
+
+| Cluster | Bedingung | Beschreibung | Beispiele |
+|---------|-----------|--------------|-----------|
+| **A-Lage** | BRW > 300 €/m² oder Hauspreis > 5.000 €/m² | Premium-Standorte | München, Hamburg-Eppendorf, Frankfurt |
+| **B-Lage** | BRW 80–300 €/m² oder Hauspreis 2.000–5.000 €/m² | Standard-Mittelstädte | Aachen, Baesweiler, Gifhorn |
+| **C-Lage** | BRW < 80 €/m² oder Hauspreis < 2.000 €/m² | Ländlich / strukturschwach | Eifel, Sachsen-Anhalt (ländlich) |
+
+### Auswirkung auf Korrekturfaktoren
+
+- **A-Lage**: Altbau-Premium (Gründerzeit hat Liebhaberwerte), schwächere Abschläge
+- **B-Lage**: Standard-Abschläge (Referenz)
+- **C-Lage**: Stärkere Abschläge für Alter/Zustand (Leerstandsrisiko)
+
+---
+
+## 5. Methodenwahl
 
 ### Bewertungsmethode
 
 | Methode | Bedingung | Beschreibung |
 |---------|-----------|--------------|
-| `sachwert-lite` | BRW vorhanden (`wert > 0`) **und** Grundstücksfläche bekannt | Bodenwert + Gebäudewert getrennt berechnet |
+| `vergleichswert` | Wohnung/ETW **und** Marktdaten vorhanden | ImmoWertV § 15: Vergleichswertverfahren für ETW |
+| `sachwert-lite` | Haus, BRW vorhanden (`wert > 0`) **und** Grundstücksfläche bekannt | NHK + IS24 Blend, Bodenwert + Gebäudewert getrennt |
 | `marktpreis-indikation` | Kein BRW **oder** keine Grundstücksfläche | Rein marktbasiert über ImmoScout-Daten |
 
 ### Marktpreis-Selektion
@@ -97,7 +125,7 @@ Je nach Immobilienart wird der passende Marktpreis aus ImmoScout gewählt:
 
 ---
 
-## 5. Korrekturfaktoren
+## 6. Korrekturfaktoren
 
 Alle Faktoren werden **additiv** zum Gesamtfaktor summiert:
 
@@ -107,44 +135,39 @@ gesamt = baujahr + modernisierung + energie + ausstattung + objektunterart + neu
 
 Der Grundstücksfaktor ist immer 0, da der Bodenwert über den BRW abgebildet wird.
 
-### 5.1 Baujahr
+### 6.1 Baujahr (lage-abhängig)
 
-| Baujahr | Faktor |
-|---------|--------|
-| `>= 2020` | `0.00` (Neubau-Faktor übernimmt) |
-| `< 1950` | `-0.10` |
-| `1950–1979` | `-0.08` |
-| `1980–1999` | `-0.04` |
-| `2000–2010` | `0.00` |
-| `2011–2019` | `+0.03` |
-| `null` | `0.00` |
+| Baujahr | A-Lage | B-Lage | C-Lage |
+|---------|--------|--------|--------|
+| `>= 2020` | `0.00` | `0.00` | `0.00` |
+| `2011–2019` | `+0.03` | `+0.03` | `+0.03` |
+| `2005–2010` | `0.00` | `0.00` | `0.00` |
+| `1995–2004` | `-0.02` | `-0.04` | `-0.05` |
+| `1980–1994` | `-0.03` | `-0.08` | `-0.10` |
+| `1970–1979` | `-0.05` | `-0.12` | `-0.16` |
+| `1950–1969` | `-0.06` | `-0.15` | `-0.20` |
+| `< 1950` | `-0.08` | `-0.20` | `-0.25` |
+| `null` | `0.00` | `0.00` | `0.00` |
 
-### 5.2 Modernisierung
+**A-Lage-Effekt:** Altbauten < 1950 bekommen nur −8% statt −20% (Gründerzeit-Stuck, hohe Decken → Liebhaberwerte in Top-Lagen).
 
-Akzeptiert numerische Scores (1–5) oder Text-Beschreibungen. Der Faktor hängt zusätzlich vom Baujahr ab.
+### 6.2 Modernisierung (kontinuierlich interpoliert)
 
-**Numerische Scores:**
+Akzeptiert numerische Scores (1–5) oder Text-Beschreibungen. Zwischen den Eckpunkten wird **linear interpoliert** (keine diskreten Stufen).
 
-| Score | Stufe | Baujahr < 1970 | Baujahr < 1990 | Baujahr >= 1990 |
-|-------|-------|----------------|----------------|-----------------|
+**Eckpunkte:**
+
+| Score | Stufe | Faktor (Baujahr < 1970) | Faktor (Baujahr < 1990) | Faktor (Baujahr >= 1990) |
+|-------|-------|-------------------------|-------------------------|--------------------------|
 | 5 | Kernsanierung / Neuwertig | `+0.02` | `+0.02` | `+0.02` |
 | 4 | Umfassend modernisiert | `0.00` | `0.00` | `0.00` |
 | 3 | Teilweise modernisiert | `-0.06` | `-0.04` | `-0.02` |
 | 2 | Nur einzelne Maßnahmen | `-0.10` | `-0.08` | `-0.05` |
 | 1 | Keine Modernisierungen | `-0.18` | `-0.12` | `-0.02` |
 
-**Text-Matching (case-insensitive):**
+Zwischenwerte (z.B. Score 3.5) werden per linearer Interpolation berechnet.
 
-| Text (enthält) | Faktor |
-|----------------|--------|
-| `"kernsanierung"`, `"neuwertig"` | `+0.02` |
-| `"umfassend"`, `"vollständig"`, `"vollsaniert"` | `0.00` |
-| `"teilweise"`, `"teilsaniert"` | `-0.02` bis `-0.06` (nach Alter) |
-| `"nur einzelne"`, `"einzelne maßnahmen"`, `"einzelne"` | `-0.05` bis `-0.10` (nach Alter) |
-| `"keine"`, `"unsaniert"`, `"unrenoviert"` | `-0.02` bis `-0.18` (nach Alter) |
-| Unbekannt | `0.00` |
-
-### 5.3 Energie
+### 6.3 Energie
 
 | Score | Text | Faktor | Beispiel-Klassen |
 |-------|------|--------|-----------------|
@@ -155,7 +178,7 @@ Akzeptiert numerische Scores (1–5) oder Text-Beschreibungen. Der Faktor hängt
 | 1 | `"sehr schlecht"`, `"schlecht"` | `-0.06` | G, H |
 | — | Unbekannt | `0.00` | — |
 
-### 5.4 Ausstattung
+### 6.4 Ausstattung
 
 | Score | Text | Faktor |
 |-------|------|--------|
@@ -166,7 +189,7 @@ Akzeptiert numerische Scores (1–5) oder Text-Beschreibungen. Der Faktor hängt
 | 1 | `"schlecht"` | `-0.05` |
 | — | Unbekannt | `0.00` |
 
-### 5.5 Objektunterart
+### 6.5 Objektunterart
 
 | Objektunterart | Faktor |
 |----------------|--------|
@@ -181,58 +204,62 @@ Akzeptiert numerische Scores (1–5) oder Text-Beschreibungen. Der Faktor hängt
 | Bauernhaus / Resthof | `-0.10` |
 | Unbekannt | `0.00` |
 
-### 5.6 Neubau-Zuschlag
+### 6.6 Neubau-Zuschlag
 
 | Baujahr | Faktor |
 |---------|--------|
 | `>= 2020` | `+0.10` |
 | `< 2020` oder `null` | `0.00` |
 
-### 5.7 Stichtag-Korrektur
+### 6.7 Stichtag-Korrektur
 
 Korrigiert den BRW basierend auf der Marktentwicklung seit dem Stichtag.
 
 **Stufe 1: Bundesbank Wohnimmobilienpreisindex** (bevorzugt)
 
-Wenn Preisindex-Daten verfügbar sind (`src/utils/bundesbank.ts`):
 ```
 Korrektur = (Index_aktuell / Index_stichtag) - 1
 ```
-Quelle: Deutsche Bundesbank SDMX API (`BBK01/BBSRI`), quartalsweise, Basis 2015=100.
-Cache: 30 Tage TTL.
 
 **Stufe 2: Pauschale Schätzung** (Fallback)
 
-Wenn kein Preisindex verfügbar:
 ```
 Alter in Jahren = (heute - BRW-Stichtag) / 365.25
 Wenn Alter > 2: Korrektur = (Alter - 2) * 0.025
 Sonst: Korrektur = 0
 ```
 
-**Beispiel:** BRW-Stichtag 2020-01-01, Index damals 100, heute 122 → Korrektur = +22%
+---
+
+## 7. Overlap-Korrekturen
+
+### 7.1 Baujahr + Neubau
+
+Für Baujahr >= 2020 gibt `calcBaujahrFaktor` `0` zurück, da der `calcNeubauFaktor` (+0.10) den Zeitwertbonus bereits vollständig abdeckt.
+
+### 7.2 Neubau + Modernisierung
+
+Ein Neubau (>= 2020) ist per Definition neuwertig. Wenn sowohl `neubau > 0` als auch `modernisierung > 0`, wird der Modernisierungs-Bonus auf 0 gesetzt.
 
 ---
 
-## 6. Overlap-Korrekturen
+## 8. Berechnungsformeln
 
-### 6.1 Baujahr + Neubau
+### 8.1 Vergleichswert (Wohnungen/ETW)
 
-Für Baujahr >= 2020 gibt `calcBaujahrFaktor` `0` zurück, da der `calcNeubauFaktor` (+0.10) den Zeitwertbonus bereits vollständig abdeckt. Ohne diese Korrektur würden +0.03 (Baujahr > 2010) und +0.10 (Neubau) doppelt gezählt.
+Wird verwendet für Wohnungen mit Marktdaten (ImmoWertV § 15).
 
-### 6.2 Neubau + Modernisierung
+```
+Adjustierter qm-Preis = Marktpreis × (1 + Gesamtfaktor) × Angebotsabschlag
+Vergleichswert = round(Adjustierter qm-Preis × Wohnfläche)
+```
 
-Ein Neubau (>= 2020) ist per Definition neuwertig. Wenn sowohl `neubau > 0` als auch `modernisierung > 0`, wird der Modernisierungs-Bonus auf 0 gesetzt und ein Hinweis erzeugt:
+Bei vorhandenem Ertragswert (Mietdaten):
+```
+Immobilienwert = 80% Vergleichswert + 20% Ertragswert
+```
 
-> „Neubau-Zuschlag schließt Modernisierungs-Bonus ein. Faktor-Überlapp wurde korrigiert."
-
-Negative Modernisierungswerte (theoretischer Sonderfall) bleiben erhalten.
-
----
-
-## 7. Berechnungsformeln
-
-### 7.1 Sachwert-lite
+### 8.2 Sachwert-lite (Häuser)
 
 Wird verwendet wenn BRW (`wert > 0`) und Grundstücksfläche vorhanden sind.
 
@@ -241,58 +268,35 @@ Wird verwendet wenn BRW (`wert > 0`) und Grundstücksfläche vorhanden sind.
 Bodenwert = round(BRW × (1 + stichtag_korrektur) × Grundstücksfläche)
 ```
 
-**Gebäudewert (mit Marktdaten):**
-```
-Markt-Gesamtwert = Marktpreis_pro_m² × Wohnfläche × (1 + Gesamtfaktor)
-Gebäudewert = round(max(0, Markt-Gesamtwert - Bodenwert))
-```
-
-**Gebäudewert (ohne Marktdaten) — NHK 2010:**
-
-Wenn kein Marktpreis verfügbar, wird der Gebäudewert nach NHK 2010 berechnet (siehe [Abschnitt 8](#8-nhk-2010-gebäudewert)).
+**Gebäudewert:** NHK 2010 berechnet + IS24 Blend (siehe [Abschnitt 10](#10-nhk-is24-blend-sachwert-lite))
 
 **Immobilienwert:**
 ```
 Immobilienwert = Bodenwert + Gebäudewert
-m²-Preis = round(Immobilienwert / Wohnfläche)
 ```
 
-### 7.2 Marktpreis-Indikation
-
-Wird verwendet wenn kein BRW oder keine Grundstücksfläche vorhanden.
+### 8.3 Marktpreis-Indikation (Fallback)
 
 ```
-korrigierter_m²_Preis = Marktpreis_pro_m² × (1 + Gesamtfaktor)
+korrigierter_m²_Preis = Marktpreis × (1 + Gesamtfaktor) × Angebotsabschlag
 Immobilienwert = round(korrigierter_m²_Preis × Wohnfläche)
 ```
 
-Falls BRW und Grundstücksfläche vorhanden (aber Methode trotzdem Marktpreis):
-```
-Bodenwert = round(BRW × Grundstücksfläche)
-Gebäudewert = round(max(0, Immobilienwert - Bodenwert))
-```
+Falls kein Marktpreis verfügbar → Landesdurchschnitt → Bundesdurchschnitt als Fallback.
 
-### 7.3 Wertspanne
-
-Die Spanne wird symmetrisch um den realistischen Wert berechnet:
+### 8.4 Wertspanne
 
 ```
-m²-Preis-Spanne:
-  min = round(m²-Preis × (1 - spread))
-  max = round(m²-Preis × (1 + spread))
-
 Immobilienwert-Spanne:
   min = round(Immobilienwert × (1 - spread))
   max = round(Immobilienwert × (1 + spread))
 ```
 
-Der `spread`-Wert wird durch die Konfidenz bestimmt (siehe nächster Abschnitt).
+Der `spread`-Wert wird durch die Konfidenz bestimmt (siehe [Abschnitt 14](#14-konfidenz--spanne)).
 
 ---
 
-## 8. NHK 2010 Gebäudewert
-
-Wenn im Sachwert-lite-Pfad kein Marktpreis verfügbar ist, wird der Gebäudewert über die **Normalherstellungskosten 2010** (ImmoWertV 2022 Anlage 4) berechnet.
+## 9. NHK 2010 Gebäudewert
 
 Implementierung: `src/utils/nhk.ts`
 
@@ -312,8 +316,6 @@ Gebäudewert = NHK_2010 × BGF × (BPI_aktuell / BPI_2010) × (RND / GND)
 | ZFH | 690 | 760 | 875 | 1.055 | 1.325 |
 | MFH / ETW | 490 | 545 | 625 | 755 | 945 |
 
-Quelle: ImmoWertV 2022 Anlage 4, Gebäudeart 1.01 (EFH), andere abgeleitet.
-
 ### BGF-Schätzung (Wohnfläche → Brutto-Grundfläche)
 
 | Typ | Faktor |
@@ -330,7 +332,7 @@ Quelle: ImmoWertV 2022 Anlage 4, Gebäudeart 1.01 (EFH), andere abgeleitet.
 BPI-Faktor = BPI_aktuell / BPI_2010
 ```
 - BPI 2010 = 90,4 (Destatis, Basis 2015=100)
-- BPI aktuell = 168,2 (Q3/2025)
+- BPI aktuell wird live über Destatis Genesis API abgerufen (`src/utils/destatis.ts`)
 
 ### Alterswertminderung (linear)
 
@@ -343,8 +345,6 @@ Gesamtnutzungsdauer (GND): 80 Jahre für alle Wohngebäude (SW-RL Anlage 3).
 
 ### Modernisierungs-Modifikation
 
-Modernisierung verlängert die Restnutzungsdauer (SW-RL Anlage 4):
-
 | Modernisierung | Mindest-RND (% der GND) |
 |----------------|------------------------|
 | Kernsanierung / Neuwertig (Score 5) | 65% |
@@ -354,9 +354,92 @@ Modernisierung verlängert die Restnutzungsdauer (SW-RL Anlage 4):
 
 ---
 
-## 9. Stichtag-Korrektur (Bundesbank)
+## 10. NHK-IS24 Blend (Sachwert-lite)
 
-Die Stichtag-Korrektur nutzt den **Deutschen Bundesbank Wohnimmobilienpreisindex** (SDMX API) für eine indexbasierte Marktanpassung.
+Kernprinzip: **NHK (Sachwert) wird IMMER berechnet.** IS24-Marktdaten dienen als Kalibrierung.
+
+### Basis-Gewichtung nach Datengranularität
+
+| Datenlage | NHK-Gewicht | IS24-Gewicht |
+|-----------|-------------|--------------|
+| Stadtteil-Daten (hohe Auflösung) | 40% | 60% |
+| Stadt-Durchschnitt | 60% | 40% |
+| Kein IS24 / Landkreis-Fallback | 100% | 0% |
+
+### Baujahr-basierte Anpassung
+
+| Baujahr | Anpassung | Grund |
+|---------|-----------|-------|
+| < 1970 | NHK-Gewicht −10pp (min 25%) | NHK unterschätzt systematisch bei Altbauten |
+| > 2015 | NHK-Gewicht −5pp (min 30%) | NHK × hoher BPI kann überschätzen |
+| 1970–2015 | keine Anpassung | Standard-Verhalten |
+
+### Divergenz-Korrektur
+
+Wenn NHK-Sachwert und IS24-Gesamtwert > 40% auseinanderliegen:
+
+| Situation | Anpassung |
+|-----------|-----------|
+| NHK > IS24 (konservativ) | NHK-Gewicht +10pp (max 80%) |
+| NHK < IS24 + Stadtteil-Daten | NHK-Gewicht −10pp (min 25%) |
+| NHK < IS24 + nur Stadt-Durchschnitt | NHK-Gewicht +10pp (max 80%) |
+
+### Blend-Formel
+
+```
+Immobilienwert = IS24-Gesamtwert × (1 - nhkWeight) + NHK-Sachwert × nhkWeight
+```
+
+### Landesdurchschnitt-Kalibrierung (ohne IS24)
+
+Wenn kein Marktpreis verfügbar und NHK > 10% unter Landesdurchschnitt:
+```
+Immobilienwert = 70% NHK-Sachwert + 30% Landesdurchschnitt
+```
+
+---
+
+## 11. Ertragswertverfahren
+
+Implementierung: `src/utils/ertragswert.ts`
+
+Das Ertragswertverfahren (ImmoWertV §§ 27-34) berechnet den Renditewert basierend auf Mieteinnahmen. Es dient als **Cross-Validation** und wird nicht direkt als Hauptmethode verwendet.
+
+### Wann wird es berechnet?
+
+- Mietdaten vorhanden (`haus_miete_preis` oder `wohnung_miete_preis` aus ImmoScout)
+- Bodenwert berechenbar (BRW vorhanden)
+
+### Formel
+
+```
+Jahresrohertrag = Mietpreis/m² × 12 × Wohnfläche
+Bewirtschaftungskosten = Rohertrag × BewKostenQuote (II. BV §26)
+Jahresreinertrag = Rohertrag - Bewirtschaftungskosten
+Bodenwertverzinsung = Bodenwert × Liegenschaftszins
+Gebäudereinertrag = Reinertrag - Bodenwertverzinsung
+Gebäudeertragswert = Gebäudereinertrag × Vervielfältiger
+Ertragswert = Bodenwert + Gebäudeertragswert
+```
+
+### Liegenschaftszinssätze (BRW-abhängig)
+
+Die Zinssätze basieren auf BewG § 256 und werden nach BRW interpoliert:
+
+| Gebäudetyp | Bereich | Hoher BRW (>200) | Niedriger BRW (<60) |
+|------------|---------|------------------|---------------------|
+| EFH/ZFH | 1,5–3,5% | Unteres Ende | Oberes Ende |
+| ETW | 2,0–4,0% | Unteres Ende | Oberes Ende |
+| MFH | 3,0–5,5% | Unteres Ende | Oberes Ende |
+
+### Verwendung im Bewertungsflow
+
+- **Wohnungen**: 80% Vergleichswert + 20% Ertragswert
+- **Häuser**: Ertragswert als Cross-Check gegen Sachwert-Blend (siehe [Plausibilitätsprüfung](#15-plausibilitätsprüfung-4-signal), Signal 2)
+
+---
+
+## 12. Stichtag-Korrektur (Bundesbank)
 
 Implementierung: `src/utils/bundesbank.ts`
 
@@ -377,48 +460,210 @@ Implementierung: `src/utils/bundesbank.ts`
 
 ---
 
-## 10. Stadtteil-Marktdaten
+## 13. Stadtteil-Marktdaten
 
 ImmoScout-Marktdaten werden wenn möglich auf Stadtteil-Ebene abgerufen.
 
-### Ablauf
-
-1. **City-Level**: `scrapeImmoScoutAtlas(bundesland, stadt)` → Stadtdurchschnitt
-2. **District-Level**: `scrapeImmoScoutDistricts(bundesland, stadt)` → Stadtteil-Liste
-3. **Matching** gegen `geo.district` (aus Nominatim):
-   - Exakter Match (Stadtteil-Name identisch)
-   - Partial Match (Stadtteil-Name enthalten)
-   - Fallback auf City-Level
-
-### Nominatim-Felder für District
+### IS24-Fallback-Kette
 
 ```
-district = address.suburb || address.city_district || address.quarter || ''
+1. Stadt-Atlas (normalisierter Stadtname) → Hit? → fertig
+2. Slug-Varianten (Bad/Sankt/Neustadt) → Hit? → fertig
+3. Landkreis-Atlas → Hit? → fertig
+4. IS24-Listing-Suche → Hit? → fertig
+5. null (kein Marktpreis)
 ```
 
-### Hinweis in der Response
+### Stadtnamen-Normalisierung
 
-- Mit Stadtteil-Match: „Marktpreise basieren auf Stadtteil-Daten für {Name}."
-- Ohne Match: „Marktpreise basieren auf Stadtdurchschnitt. Lage-spezifische Abweichungen möglich."
+Nominatim liefert offizielle Präfixe, die IS24 nicht kennt. Funktion `normalizeCityForIS24()` entfernt:
+
+- "Hansestadt Lübeck" → "Lübeck"
+- "Universitätsstadt Tübingen" → "Tübingen"
+- "Bundesstadt Bonn" → "Bonn"
+- "Landeshauptstadt München" → "München"
+
+### District-Level Matching
+
+1. `scrapeImmoScoutDistricts(bundesland, stadt)` → Stadtteil-Liste
+2. Matching gegen `geo.district` (aus Nominatim):
+   - Exakter Match → Stadtteil-Daten
+   - Partial Match → Stadtteil-Daten
+   - Kein Match → City-Level
 
 ---
 
-## 11. Konfidenz & Spanne
-
-Die Konfidenz-Stufe und der Spread hängen von Bewertungsmethode und BRW-Qualität ab.
+## 14. Konfidenz & Spanne
 
 | Methode | BRW-Qualität | Konfidenz | Spread |
 |---------|-------------|-----------|--------|
 | `sachwert-lite` | Offizieller BRW | `hoch` | ±8% |
-| `sachwert-lite` | Geschätzter BRW (`schaetzung = true`) | `mittel` | ±15% |
-| `sachwert-lite` | Kein BRW / ungültig | `gering` | ±20% |
+| `sachwert-lite` | Geschätzter BRW | `mittel` | ±15% |
+| `vergleichswert` | (irrelevant) | `mittel` | ±12% |
 | `marktpreis-indikation` | (irrelevant) | `mittel` | ±15% |
-
-Bei der `marktpreis-indikation` ist die BRW-Qualität irrelevant, da der BRW nicht in die Berechnung einfließt. Der Stadtdurchschnitt aus ImmoScout hat eine inhärente Unsicherheit von ca. ±15%.
+| Fallback (kein IS24) | (irrelevant) | `gering` | ±20% |
 
 ---
 
-## 12. Cross-Validation
+## 15. Plausibilitätsprüfung (4-Signal)
+
+Nach der Hauptberechnung läuft eine **iterative Validierungsschleife** (max. 3 Iterationen), die den Wert automatisch korrigiert.
+
+### Signal 1: Gebäudewert/m² im NHK-Bereich?
+
+```
+Wenn Gebäudewert/m² > 4.000 €/m² → auf Maximum deckeln
+```
+
+### Signal 2: Ertragswert-Abgleich (stärkstes Signal)
+
+```
+Wenn Sachwert > 25% vom Ertragswert abweicht:
+  Pull-Stärke = min(40%, 25% + (Abweichung - 25%) × 30%)
+  Korrektur = Sachwert × (1 - Pull) + Ertragswert × Pull
+```
+
+Graduierte Korrektur: Je stärker die Abweichung, desto stärker der Pull zum Ertragswert (max. 40%).
+
+### Signal 3: Bodenwertanteil plausibel?
+
+```
+Wenn Bodenwertanteil > 70% (Haus):
+  Gesamtwert mindestens 1,5× Bodenwert
+```
+
+### Signal 4: qm-Preis im Landesrahmen?
+
+```
+Untergrenze = Landesdurchschnitt × 20%
+Obergrenze = Landesdurchschnitt × 300%
+Werte außerhalb werden auf die Grenze geclampt.
+```
+
+Landesdurchschnitte sind für alle 16 Bundesländer hinterlegt (getrennt nach Haus/Wohnung).
+
+---
+
+## 16. KI-Validierung (LLM)
+
+Implementierung: `src/llm-validator.ts`
+
+Nach der deterministischen Bewertung + Plausibilitätsprüfung wird das Ergebnis an **Claude Sonnet** gesendet, der als KI-Sachverständiger die Plausibilität prüft.
+
+### Architektur
+
+```
+buildBewertung()        → Deterministische Bewertung
+     ↓
+validateBewertung()     → Claude prüft Ergebnis
+     ↓
+applyLLMCorrection()    → Auto-Korrektur bei Auffälligkeiten
+     ↓
+Response mit bewertung + validation
+```
+
+### Prompt-Design
+
+Das LLM erhält:
+- Alle Eingabedaten (Adresse, Bundesland, Objektdaten)
+- Bodenrichtwert (Wert, Stichtag, offiziell/geschätzt)
+- Bewertungsergebnis (Wert, Spanne, Methode, Konfidenz)
+- Alle Korrekturfaktoren
+- Bestehende Hinweise
+
+Rollenpriming: *"Du bist ein erfahrener Immobilien-Sachverständiger (§ 198 BewG, ImmoWertV 2022)."*
+
+### Bewertungsstufen
+
+| Status | Bedeutung | Schwelle |
+|--------|-----------|----------|
+| `plausibel` | Wert im erwartbaren Bereich für Lage/Alter/Zustand | < 10% Abweichung |
+| `auffaellig` | Leichte Abweichung, könnte noch stimmen | 10–25% |
+| `unplausibel` | Starke Abweichung, widerspricht Marktkenntnis | > 25% |
+
+### ValidationResult-Objekt
+
+```typescript
+interface ValidationResult {
+  status: 'plausibel' | 'auffaellig' | 'unplausibel' | 'fehler' | 'deaktiviert';
+  confidence: number;           // 0.0 – 1.0
+  bewertung_angemessen: boolean;
+  abweichung_einschaetzung: string | null;
+  empfohlener_wert: number | null;
+  hinweise: string[];           // Max 3
+  modell: string;
+  dauer_ms: number;
+}
+```
+
+### Konfiguration
+
+| Env-Variable | Default | Beschreibung |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | API-Key (ohne Key → Validierung deaktiviert) |
+| `LLM_MODEL` | `claude-sonnet-4-5-20250929` | Modell |
+| `LLM_TIMEOUT_MS` | `8000` | Timeout in ms |
+
+### Sicherheitsnetze
+
+- **Kein API-Key** → `status: "deaktiviert"`, Bewertung unverändert
+- **Timeout** → `status: "fehler"`, Bewertung unverändert
+- **API-Fehler** → `status: "fehler"`, Bewertung unverändert
+- **24h In-Memory-Cache** → gleiche Input+Ergebnis-Kombination nur einmal geprüft
+
+### Kosten
+
+~0.6–0.8 Cent pro Validierung (Sonnet 4.5: ~1.000 Input-Tokens, ~200 Output-Tokens).
+
+---
+
+## 17. KI-Auto-Korrektur
+
+Wenn das LLM eine Auffälligkeit erkennt **und** einen `empfohlener_wert` liefert, wird der Bewertungswert automatisch korrigiert.
+
+### Korrektur-Regeln
+
+| LLM-Status | Min. Confidence | Blend-Stärke | Beschreibung |
+|---|---|---|---|
+| `plausibel` | — | 0% | Keine Korrektur |
+| `auffaellig` | ≥ 0.70 | **30%** Richtung LLM | Leichte Anpassung |
+| `unplausibel` | ≥ 0.75 | **50%** Richtung LLM | Stärkere Anpassung |
+| `fehler` / `deaktiviert` | — | 0% | Keine Korrektur |
+
+### Blend-Formel
+
+```
+korrigierter_Wert = Original × (1 - blendWeight) + LLM-Empfehlung × blendWeight
+```
+
+### Sicherheitsnetze
+
+| Bedingung | Verhalten |
+|-----------|-----------|
+| Kein `empfohlener_wert` | Keine Korrektur |
+| LLM-Wert < 20% oder > 500% des Originals | Ignoriert (Sanity-Check) |
+| Confidence unter Schwelle | Keine Korrektur |
+
+### Transparenz
+
+Bei Korrektur wird ein Hinweis hinzugefügt:
+
+> „KI-Korrektur (auffaellig): Wert um 12% angehoben (300.000 → 336.000 €, Blend 30% LLM-Empfehlung, Confidence 85%)."
+
+Und `KI-Validierung (claude-sonnet-4-5-20250929)` wird zu den Datenquellen hinzugefügt.
+
+### Beispiel
+
+```
+Deterministische Bewertung:  300.000 €
+LLM-Empfehlung:              380.000 € (status: "unplausibel", confidence: 0.88)
+Blend (50%):                  300k × 0.5 + 380k × 0.5 = 340.000 €
+→ Response: 340.000 € mit transparentem Hinweis
+```
+
+---
+
+## 18. Cross-Validation
 
 Wenn **beide** Datenquellen verfügbar sind (BRW + ImmoScout), wird eine Plausibilitätsprüfung durchgeführt:
 
@@ -427,19 +672,13 @@ reiner_Marktwert = Marktpreis_pro_m² × Wohnfläche
 Abweichung = |Immobilienwert - reiner_Marktwert| / reiner_Marktwert
 ```
 
-Bei Abweichung > 25% wird ein Hinweis erzeugt:
+Bei Abweichung > 25%:
 
 > „Sachwert-Ergebnis weicht X% vom reinen Marktpreis ab. Manuelle Prüfung empfohlen."
 
-**Beispiel:**
-| Reiner Marktwert | Berechneter Wert | Abweichung | Warnung? |
-|------------------|------------------|------------|----------|
-| 400.000 € | 450.000 € | 12,5% | Nein |
-| 400.000 € | 520.000 € | 30% | Ja |
-
 ---
 
-## 13. NRW Immobilienrichtwerte
+## 19. NRW Immobilienrichtwerte
 
 Für Adressen in Nordrhein-Westfalen wird der **BORIS-NRW Immobilienrichtwert** (IRW) als zusätzliche Cross-Validation abgerufen.
 
@@ -447,134 +686,147 @@ Implementierung: `src/utils/nrw-irw.ts`
 
 ### Datenquelle
 
-- WMS: `https://www.wms.nrw.de/boris/wms_nw_irw` (aktueller Jahrgang)
+- WMS: `https://www.wms.nrw.de/boris/wms_nw_irw`
 - Fallback: `https://www.wms.nrw.de/boris/wms-t_nw_irw` (ab 2011)
 - Lizenz: Datenlizenz Deutschland – Zero – Version 2.0
-- Format: GetFeatureInfo (XML, HTML, JSON)
-
-### Was sind IRW?
-
-IRW sind georeferenzierte, amtliche Durchschnittswerte für Immobilien in EUR/m² Wohnfläche, bezogen auf ein standorttypisches **Normobjekt**. Sie umfassen Boden + Gebäude.
-
-### Teilmärkte
-
-| Kürzel | Beschreibung |
-|--------|-------------|
-| EFH | Ein-/Zweifamilienhäuser |
-| RDH | Reihen-/Doppelhäuser |
-| ETW | Eigentumswohnungen |
-| MFH | Mehrfamilienhäuser |
 
 ### Cross-Validation
-
-```
-IRW-Gesamtwert = IRW_pro_m² × Wohnfläche
-Abweichung = |Immobilienwert - IRW-Gesamtwert| / IRW-Gesamtwert
-```
 
 | Abweichung | Hinweis |
 |------------|---------|
 | ≤ 25% | „NRW Immobilienrichtwert bestätigt Bewertung." |
 | > 25% | „Erhebliche Abweichung zum NRW Immobilienrichtwert. Manuelle Prüfung empfohlen." |
 
-### Einschränkungen
-
-- Nur für NRW-Adressen (`geo.state === 'Nordrhein-Westfalen'`)
-- WMS-Endpoint kann langsam oder nicht erreichbar sein → Timeout 10s, blockiert nie die Haupt-Response
-- Nicht alle Gemeinden haben IRW-Daten
-
 ---
 
-## 14. Hinweise-System
+## 20. Hinweise-System
 
 Automatisch generierte Warnungen im `hinweise[]`-Array:
 
-| # | Bedingung | Hinweis |
-|---|-----------|---------|
-| 1 | Input-Validierung (Baujahr, Wohnfläche, Grundstück) | „{Feld} liegt außerhalb des plausiblen Bereichs. Ergebnis möglicherweise unzuverlässig." |
-| 2 | Neubau (>= 2020) + Modernisierung positiv | „Neubau-Zuschlag schließt Modernisierungs-Bonus ein. Faktor-Überlapp wurde korrigiert." |
-| 3 | Bodenwert > Markt-Gesamtwert (Sachwert-lite) | „Bodenwert übersteigt Marktindikation. Grundstücksanteil dominiert den Gesamtwert." |
-| 4 | Kein Marktpreis, NHK 2010 berechnet | NHK-Berechnungsdetails (Kostenkennwert, BGF, BPI, RND/GND). |
-| 5 | Modernisierung verlängert RND | „Modernisierung verlängert Restnutzungsdauer von X auf Y Jahre." |
-| 6 | BRW-Stichtag mit Bundesbank-Index korrigiert | „BRW-Stichtag {Datum}: Marktanpassung +{X}% (Bundesbank Wohnimmobilienpreisindex)." |
-| 7 | BRW-Stichtag mit Pauschale korrigiert | „BRW-Stichtag {Datum}: Marktanpassung +{X}% (pauschale Schätzung +2,5%/Jahr)." |
-| 8 | Cross-Validation > 25% Abweichung | „Sachwert-Ergebnis weicht {X}% vom reinen Marktpreis ab. Manuelle Prüfung empfohlen." |
-| 9 | NRW IRW Cross-Validation | „NRW Immobilienrichtwert bestätigt/weicht ab (IRW: X €/m²)." |
-| 10 | BRW ist Schätzwert (`schaetzung = true`) | „Bodenrichtwert ist ein Schätzwert. Genauigkeit eingeschränkt." |
-| 11 | Marktpreis-Indikation ohne BRW | „Kein Bodenrichtwert verfügbar. Bewertung basiert ausschließlich auf ImmoScout Marktdaten." |
-| 12 | Marktpreis-Indikation ohne Grundstücksfläche | „Grundstücksfläche fehlt. Aufteilung in Boden-/Gebäudewert nicht möglich." |
-| 13 | Stadtteil-Daten vorhanden | „Marktpreise basieren auf Stadtteil-Daten für {Name}." |
-| 14 | Kein Stadtteil → Stadtdurchschnitt | „Marktpreise basieren auf Stadtdurchschnitt. Lage-spezifische Abweichungen möglich." |
+| # | Quelle | Bedingung | Hinweis |
+|---|--------|-----------|---------|
+| 1 | Input | Baujahr/Wohnfläche/Grundstück unplausibel | „{Feld} liegt außerhalb des plausiblen Bereichs." |
+| 2 | Overlap | Neubau + Modernisierung positiv | „Neubau-Zuschlag schließt Modernisierungs-Bonus ein." |
+| 3 | Sachwert | Bodenwert > Markt-Gesamtwert | „Grundstücksanteil dominiert den Gesamtwert." |
+| 4 | NHK | Kein Marktpreis → NHK berechnet | NHK-Berechnungsdetails |
+| 5 | NHK | Modernisierung verlängert RND | „Restnutzungsdauer von X auf Y Jahre verlängert." |
+| 6 | Blend | NHK-IS24 Divergenz > 40% | „IS24-Marktpreis weicht X% vom NHK-Sachwert ab." |
+| 7 | Blend | Blend-Gewichtung | „Sachwert-Blend: X% NHK / Y% Markt." |
+| 8 | Stichtag | BRW mit Bundesbank-Index korrigiert | „Marktanpassung +X% (Bundesbank)." |
+| 9 | Cross | Sachwert vs. Marktpreis > 25% | „Manuelle Prüfung empfohlen." |
+| 10 | NRW | IRW Cross-Validation | „NRW Immobilienrichtwert bestätigt/weicht ab." |
+| 11 | Ertragswert | Ertragswert berechnet | Details zu Rohertrag, LiZi, Vervielfältiger |
+| 12 | Plausibilität | 4-Signal-Korrektur angewandt | „Plausibilitätskorrektur: {Details}." |
+| 13 | KI | LLM-Korrektur angewandt | „KI-Korrektur ({status}): Wert um X% {richtung}." |
+| 14 | Stadtteil | Stadtteil-Match vorhanden | „Marktpreise basieren auf Stadtteil-Daten." |
+| 15 | Stadtteil | Kein Match → Stadtdurchschnitt | „Lage-spezifische Abweichungen möglich." |
 
 ---
 
-## 15. Ausgabeformat
+## 21. Ausgabeformat
 
 ### Bewertung-Objekt
 
 ```typescript
 interface Bewertung {
-  realistischer_qm_preis: number;                          // €/m²
-  qm_preis_spanne: { min: number; max: number };           // €/m² Bereich
-  realistischer_immobilienwert: number;                    // Gesamtwert in €
-  immobilienwert_spanne: { min: number; max: number };     // Gesamtwert-Bereich in €
-  bodenwert: number;                                       // Bodenwert in €
-  gebaeudewert: number;                                    // Gebäudewert in €
-  bewertungsmethode: 'sachwert-lite' | 'marktpreis-indikation';
+  realistischer_qm_preis: number;
+  qm_preis_spanne: { min: number; max: number };
+  realistischer_immobilienwert: number;
+  immobilienwert_spanne: { min: number; max: number };
+  bodenwert: number;
+  gebaeudewert: number;
+  ertragswert: number | null;
+  bewertungsmethode: 'sachwert-lite' | 'marktpreis-indikation' | 'vergleichswert';
   konfidenz: 'hoch' | 'mittel' | 'gering';
-  faktoren: BewertungFaktoren;                            // Alle Korrekturfaktoren
-  hinweise: string[];                                      // Warnungen/Hinweise
-  datenquellen: string[];                                  // Verwendete Datenquellen
+  faktoren: BewertungFaktoren;
+  hinweise: string[];
+  datenquellen: string[];
 }
 ```
 
-### Beispiel-Response (Sachwert-lite)
+### Validation-Objekt
+
+```typescript
+interface ValidationResult {
+  status: 'plausibel' | 'auffaellig' | 'unplausibel' | 'fehler' | 'deaktiviert';
+  confidence: number;
+  bewertung_angemessen: boolean;
+  abweichung_einschaetzung: string | null;
+  empfohlener_wert: number | null;
+  hinweise: string[];
+  modell: string;
+  dauer_ms: number;
+}
+```
+
+### Beispiel-Response (Sachwert-lite + KI-Validierung)
 
 ```json
 {
   "bewertung": {
-    "realistischer_qm_preis": 3150,
-    "qm_preis_spanne": { "min": 2898, "max": 3402 },
-    "realistischer_immobilienwert": 441000,
-    "immobilienwert_spanne": { "min": 405720, "max": 476280 },
-    "bodenwert": 125000,
-    "gebaeudewert": 316000,
+    "realistischer_qm_preis": 2179,
+    "qm_preis_spanne": { "min": 2005, "max": 2353 },
+    "realistischer_immobilienwert": 305000,
+    "immobilienwert_spanne": { "min": 280600, "max": 329400 },
+    "bodenwert": 50400,
+    "gebaeudewert": 254600,
+    "ertragswert": 289000,
     "bewertungsmethode": "sachwert-lite",
     "konfidenz": "hoch",
     "faktoren": {
-      "baujahr": -0.04,
-      "modernisierung": -0.04,
+      "baujahr": -0.12,
+      "modernisierung": -0.02,
       "energie": -0.01,
       "ausstattung": 0,
-      "objektunterart": 0,
+      "objektunterart": -0.05,
       "grundstueck": 0,
       "neubau": 0,
-      "stichtag_korrektur": 0,
-      "gesamt": -0.09
+      "stichtag_korrektur": 0.03,
+      "gesamt": -0.17
     },
     "hinweise": [
-      "Marktpreise basieren auf Stadtdurchschnitt (ImmoScout24 Atlas). Lage-spezifische Abweichungen möglich."
+      "Sachwert-Blend: 50% NHK (278.000 €) / 50% Markt (332.000 €) [Stadt-Durchschnitt].",
+      "Ertragswert bestätigt Bewertung: 289.000 € (Abweichung 5%, LiZi 3.2%)."
     ],
     "datenquellen": [
       "BORIS/WFS Bodenrichtwert",
-      "ImmoScout24 Atlas Marktpreise"
+      "NHK 2010 (ImmoWertV 2022)",
+      "Destatis Baupreisindex",
+      "ImmoScout24 Atlas Marktpreise",
+      "Ertragswertverfahren (ImmoWertV §§ 27-34)",
+      "Bundesbank Wohnimmobilienpreisindex"
     ]
+  },
+  "validation": {
+    "status": "plausibel",
+    "confidence": 0.92,
+    "bewertung_angemessen": true,
+    "abweichung_einschaetzung": null,
+    "empfohlener_wert": null,
+    "hinweise": [
+      "Wert liegt im erwartbaren Bereich für eine DHH BJ1986 in B-Lage NRW."
+    ],
+    "modell": "claude-sonnet-4-5-20250929",
+    "dauer_ms": 1847
   }
 }
 ```
 
-### Datenquellen
+### Datenquellen (vollständige Liste)
 
 | Quelle | Wann verwendet |
 |--------|---------------|
-| `BORIS/WFS Bodenrichtwert` | BRW vorhanden und genutzt (Sachwert-lite) |
+| `BORIS/WFS Bodenrichtwert` | BRW vorhanden und genutzt |
 | `ImmoScout24 Atlas Marktpreise` | Marktpreise verfügbar |
-| `NHK 2010 (ImmoWertV 2022)` | Gebäudewert ohne Marktdaten berechnet |
+| `NHK 2010 (ImmoWertV 2022)` | Gebäudewert berechnet |
+| `Destatis Baupreisindex` | BPI live abgerufen |
 | `Bundesbank Wohnimmobilienpreisindex` | Stichtag-Korrektur mit echtem Index |
+| `Ertragswertverfahren (ImmoWertV §§ 27-34)` | Ertragswert berechnet |
+| `Vergleichswertverfahren (ImmoWertV § 15)` | Vergleichswert für Wohnungen |
 | `BORIS-NRW Immobilienrichtwerte` | IRW Cross-Validation (nur NRW) |
-| `ImmoScout24 Atlas (BRW-Schätzwert)` | BRW ist ein geschätzter Wert |
-
-Datenquellen werden dedupliziert ausgegeben.
+| `Landesdurchschnitt {Bundesland}` | NHK-Kalibrierung ohne IS24 |
+| `Plausibilitätsprüfung (Auto-Korrektur)` | 4-Signal-Korrektur angewandt |
+| `KI-Validierung (claude-sonnet-4-5-20250929)` | LLM-Korrektur angewandt |
 
 ---
 
@@ -584,8 +836,9 @@ Datenquellen werden dedupliziert ausgegeben.
 POST /api/enrich (mit wohnflaeche, baujahr, etc.)
   │
   ├─ Parallel starten:
-  │   ├─ ImmoScout City → District Marktdaten
+  │   ├─ ImmoScout City → Slug-Varianten → Landkreis → IS24-Suche → District
   │   ├─ Bundesbank Preisindex
+  │   ├─ Destatis Baupreisindex
   │   └─ NRW IRW (nur Nordrhein-Westfalen)
   │
   ├─ Gate: wohnflaeche vorhanden?  ──── Nein ──→ bewertung: null
@@ -595,35 +848,39 @@ POST /api/enrich (mit wohnflaeche, baujahr, etc.)
   ├─ Gate: Datenquelle verfügbar?  ──── Nein ──→ bewertung: null
   │
   ├─ Immobilienart erkennen (Haus vs. Wohnung)
+  ├─ Lage-Cluster bestimmen (A/B/C)
   │
-  ├─ Marktpreis wählen (haus_kauf_preis / wohnung_kauf_preis)
+  ├─ Marktpreis wählen (haus_kauf / wohnung_kauf)
   │   └─ Stadtteil-Daten bevorzugt (→ City-Fallback)
   │
-  ├─ 7 Korrekturfaktoren berechnen
-  │   ├─ Baujahr
-  │   ├─ Modernisierung (baujahr-abhängig)
-  │   ├─ Energie
-  │   ├─ Ausstattung
-  │   ├─ Objektunterart
-  │   ├─ Neubau (>= 2020)
-  │   └─ Stichtag-Korrektur (Bundesbank-Index → Pauschale)
-  │
+  ├─ 7 Korrekturfaktoren berechnen (lage-abhängig)
   ├─ Overlap-Korrekturen (Neubau vs. Baujahr/Modernisierung)
-  │
   ├─ Gesamtfaktor summieren
   │
   ├─ Methode wählen
-  │   ├─ BRW + Grundstück → Sachwert-lite
+  │   ├─ Wohnung + Marktdaten → Vergleichswert (ggf. +20% Ertragswert)
+  │   ├─ Haus + BRW + Grundstück → Sachwert-lite (NHK-IS24 Blend)
   │   └─ Sonst → Marktpreis-Indikation
   │
-  ├─ Immobilienwert berechnen
-  │   └─ Ohne Marktdaten: NHK 2010 Gebäudewert
+  ├─ Ertragswert berechnen (wenn Mietdaten vorhanden)
   │
-  ├─ Konfidenz + Spread bestimmen
-  │
-  ├─ Wertspannen berechnen (±spread)
+  ├─ Plausibilitätsprüfung (4 Signale, max 3 Iterationen)
+  │   ├─ Gebäudewert/m² im NHK-Bereich?
+  │   ├─ Ertragswert-Abgleich (graduierter Pull)
+  │   ├─ Bodenwertanteil < 70%?
+  │   └─ qm-Preis im Landesrahmen?
   │
   ├─ Cross-Validation (Marktpreis + NRW IRW)
   │
-  └─ Hinweise sammeln → Bewertung zurückgeben
+  ├─ Konfidenz + Spread bestimmen
+  ├─ Wertspannen berechnen (±spread)
+  │
+  ├─ KI-Validierung (Claude Sonnet)
+  │   ├─ Cache-Hit? → Ergebnis sofort
+  │   └─ API-Aufruf → JSON-Antwort parsen
+  │
+  ├─ KI-Auto-Korrektur (wenn auffällig/unplausibel + empfohlener_wert)
+  │   └─ Graduierter Blend (30% oder 50% Richtung LLM)
+  │
+  └─ Response: bewertung + validation
 ```

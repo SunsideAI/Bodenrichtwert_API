@@ -41,6 +41,19 @@ railway domain
 | `NOMINATIM_URL` | `https://nominatim.openstreetmap.org` | Geocoding-Service |
 | `NODE_ENV` | `production` | Umgebung |
 | `PORT` | `3000` | Server-Port (Railway setzt das automatisch) |
+| `ANTHROPIC_API_KEY` | `sk-ant-api03-...` | **Optional** — Aktiviert KI-Plausibilitätsprüfung (Claude Sonnet). Ohne Key läuft die API normal, Validierung gibt `"status": "deaktiviert"` zurück. |
+| `LLM_MODEL` | `claude-sonnet-4-5-20250929` | Modell für KI-Validierung (Default: Sonnet 4.5) |
+| `LLM_TIMEOUT_MS` | `8000` | Timeout in ms für LLM-Anfragen (Default: 8000) |
+
+### API-Key hinterlegen
+
+**Lokal** — in `.env` Datei:
+```bash
+cp .env.example .env
+# Dann ANTHROPIC_API_KEY= eintragen
+```
+
+**Railway (Produktion)** — Railway Dashboard → Projekt → **Variables** → `+ New Variable` → `ANTHROPIC_API_KEY`
 
 ## API
 
@@ -81,8 +94,16 @@ Zapier Webhook → POST /api/enrich
                   → PLZ → Bundesland
                   → State Router → Adapter
                   → Cache Check (SQLite, 6 Mo. TTL)
-                  → WFS-Abfrage
+                  → WFS-Abfrage (Bodenrichtwert)
                   → Normalisierung
-                  → Erstindikation berechnen
+                  → Lage-Cluster bestimmen (A/B/C)
+                  → Methodenwahl (sachwert-lite / vergleichswert)
+                  → IS24-Marktdaten (Atlas + Listing-Scraper)
+                  → NHK-Berechnung + IS24-Blend
+                  → Ertragswertverfahren (Plausibilitäts-Signal)
+                  → 4-Signal-Plausibilitätsprüfung
+                  → KI-Validierung (Claude Sonnet, optional)
                   → JSON Response zurück an Zapier
 ```
+
+Vollständige Bewertungslogik: siehe [docs/bewertung.md](docs/bewertung.md)
