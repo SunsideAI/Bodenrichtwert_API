@@ -2,7 +2,7 @@
 
 Technische Dokumentation des Bewertungsmoduls (`src/bewertung.ts`) und der KI-Validierungsschicht (`src/llm-validator.ts`).
 
-Das Modul liefert die Felder `bewertung` und `validation` in der API-Response von `POST /api/enrich`. Es kombiniert bis zu 7 Datenquellen:
+Das Modul liefert die Felder `bewertung`, `validation` und `bericht` in der API-Response von `POST /api/enrich`. Es kombiniert bis zu 9 Datenquellen:
 
 - **Bodenrichtwerte** (BORIS/WFS) — offiziell oder geschätzt
 - **ImmoScout24 Atlas** — Marktpreise auf Stadt- oder Stadtteil-Ebene
@@ -11,6 +11,7 @@ Das Modul liefert die Felder `bewertung` und `validation` in der API-Response vo
 - **Bundesbank Wohnimmobilienpreisindex** — indexbasierte Stichtag-Korrektur
 - **Destatis Baupreisindex** — Baukosten-Hochrechnung von 2010 auf heute
 - **BORIS-NRW Immobilienrichtwerte** — amtliche Vergleichswerte (nur NRW)
+- **KI-Recherche** (Claude + Web-Search) — automatische Datenrecherche bei schlechter Datenlage
 - **KI-Validierung** (Claude Sonnet) — LLM-basierte Plausibilitätsprüfung + Auto-Korrektur
 
 ---
@@ -32,12 +33,14 @@ Das Modul liefert die Felder `bewertung` und `validation` in der API-Response vo
 13. [Stadtteil-Marktdaten](#13-stadtteil-marktdaten)
 14. [Konfidenz & Spanne](#14-konfidenz--spanne)
 15. [Plausibilitätsprüfung (4-Signal)](#15-plausibilitätsprüfung-4-signal)
-16. [KI-Validierung (LLM)](#16-ki-validierung-llm)
-17. [KI-Auto-Korrektur](#17-ki-auto-korrektur)
-18. [Cross-Validation](#18-cross-validation)
-19. [NRW Immobilienrichtwerte](#19-nrw-immobilienrichtwerte)
-20. [Hinweise-System](#20-hinweise-system)
-21. [Ausgabeformat](#21-ausgabeformat)
+16. [KI-Recherche bei schlechter Datenlage](#16-ki-recherche-bei-schlechter-datenlage)
+17. [KI-Validierung (LLM)](#17-ki-validierung-llm)
+18. [KI-Auto-Korrektur](#18-ki-auto-korrektur)
+19. [Cross-Validation](#19-cross-validation)
+20. [NRW Immobilienrichtwerte](#20-nrw-immobilienrichtwerte)
+21. [Hinweise-System](#21-hinweise-system)
+22. [Bericht-Objekt (PDFMonkey)](#22-bericht-objekt-pdfmonkey)
+23. [Ausgabeformat](#23-ausgabeformat)
 
 ---
 
@@ -540,11 +543,79 @@ Obergrenze = Landesdurchschnitt × 300%
 Werte außerhalb werden auf die Grenze geclampt.
 ```
 
+**Bodenwert-Floor:** Der Cap darf den Gesamtwert **nie unter den Bodenwert** drücken. Bei extrem hohen BRW (z.B. 8.500 €/m² in Berlin-Mitte) übersteigt allein der Bodenwert/m² Wohnfläche jeden sinnvollen Wohnpreis-Cap.
+
+```
+Mindest-Gebäudewert = Wohnfläche × 500 €/m² (absolutes Minimum)
+Bodenwert-Floor = Bodenwert + Mindest-Gebäudewert
+Gesamtwert = max(Cap-Wert, Bodenwert-Floor)
+```
+
 Landesdurchschnitte sind für alle 16 Bundesländer hinterlegt (getrennt nach Haus/Wohnung).
+
+### Finale Invariante: Gesamtwert ≥ Bodenwert
+
+Nach der 4-Signal-Schleife wird sichergestellt, dass ein bebautes Grundstück nie weniger wert sein kann als das unbebaute:
+
+```
+Wenn istHaus UND Bodenwert > 0 UND Gesamtwert ≤ Bodenwert:
+  Mindest-Gebäudewert = Wohnfläche × 500 €/m²
+  Gesamtwert = Bodenwert + Mindest-Gebäudewert
+```
+
+**Beispiel Berlin-Mitte (BRW 8.500 €/m², 450 m² Grundstück, 138 m² Wohnfläche):**
+
+| Schritt | Vorher (Bug) | Nachher (Fix) |
+|---------|-------------|---------------|
+| Bodenwert | 3.825.000 € | 3.825.000 € |
+| Signal 3 hebt auf | 5.737.500 € | 5.737.500 € |
+| Signal 4 deckelt auf | 1.580.952 € | 3.894.340 € (Floor!) |
+| Gebäudewert | 0 € | 69.340 € |
 
 ---
 
-## 16. KI-Validierung (LLM)
+## 16. KI-Recherche bei schlechter Datenlage
+
+Implementierung: `src/utils/ai-research.ts`
+
+Wenn die Datenlage schlecht ist, wird automatisch eine KI-gestützte Web-Recherche gestartet, um fehlende Bodenrichtwerte und Marktdaten zu ergänzen.
+
+### Trigger-Bedingungen
+
+| Trigger | Beispiel |
+|---------|----------|
+| Kein BORIS-BRW | Bayern, Baden-Württemberg |
+| Keine IS24-Marktdaten | Kleine Gemeinden < 10.000 Einwohner |
+| Fallback-Adapter aktiv | Bundesland ohne WFS-Dienst |
+
+### Recherche-Ablauf
+
+1. **Claude + Web-Search** recherchiert synchron (Timeout: 20s):
+   - Lokale Bodenrichtwerte (Gutachterausschuss-Berichte, Gemeinde-Websites)
+   - Vergleichsobjekte (ImmoScout/Immowelt Listings)
+   - Lokale Marktberichte (Sparkassen, IVD, Gutachterausschuss-Jahresberichte)
+   - Gemeinde-spezifische Faktoren (Einwohnerzahl, Infrastruktur)
+
+2. **Synthetische Daten** werden aus den Recherche-Ergebnissen erstellt:
+   - Synthetischer BRW (wenn kein offizieller verfügbar)
+   - Synthetische Marktdaten (Vergleichspreise pro m²)
+
+### Konfiguration
+
+| Env-Variable | Default | Beschreibung |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | API-Key (ohne Key → Recherche deaktiviert) |
+| `RESEARCH_MODEL` | `claude-sonnet-4-5-20250929` | Modell für Recherche |
+| `RESEARCH_TIMEOUT_MS` | `20000` | Timeout (max 5 Web-Suchen) |
+
+### Confidence-Level
+
+Recherche-basierte Daten erhalten `confidence: "research"` in der Response (statt `"high"` für offizielle oder `"estimated"` für IS24-basierte Daten).
+
+---
+
+## 17. KI-Validierung (LLM)
+
 
 Implementierung: `src/llm-validator.ts`
 
@@ -617,7 +688,7 @@ interface ValidationResult {
 
 ---
 
-## 17. KI-Auto-Korrektur
+## 18. KI-Auto-Korrektur
 
 Wenn das LLM eine Auffälligkeit erkennt **und** einen `empfohlener_wert` liefert, wird der Bewertungswert automatisch korrigiert.
 
@@ -663,7 +734,7 @@ Blend (50%):                  300k × 0.5 + 380k × 0.5 = 340.000 €
 
 ---
 
-## 18. Cross-Validation
+## 19. Cross-Validation
 
 Wenn **beide** Datenquellen verfügbar sind (BRW + ImmoScout), wird eine Plausibilitätsprüfung durchgeführt:
 
@@ -678,7 +749,7 @@ Bei Abweichung > 25%:
 
 ---
 
-## 19. NRW Immobilienrichtwerte
+## 20. NRW Immobilienrichtwerte
 
 Für Adressen in Nordrhein-Westfalen wird der **BORIS-NRW Immobilienrichtwert** (IRW) als zusätzliche Cross-Validation abgerufen.
 
@@ -699,7 +770,7 @@ Implementierung: `src/utils/nrw-irw.ts`
 
 ---
 
-## 20. Hinweise-System
+## 21. Hinweise-System
 
 Automatisch generierte Warnungen im `hinweise[]`-Array:
 
@@ -717,13 +788,120 @@ Automatisch generierte Warnungen im `hinweise[]`-Array:
 | 10 | NRW | IRW Cross-Validation | „NRW Immobilienrichtwert bestätigt/weicht ab." |
 | 11 | Ertragswert | Ertragswert berechnet | Details zu Rohertrag, LiZi, Vervielfältiger |
 | 12 | Plausibilität | 4-Signal-Korrektur angewandt | „Plausibilitätskorrektur: {Details}." |
-| 13 | KI | LLM-Korrektur angewandt | „KI-Korrektur ({status}): Wert um X% {richtung}." |
-| 14 | Stadtteil | Stadtteil-Match vorhanden | „Marktpreise basieren auf Stadtteil-Daten." |
-| 15 | Stadtteil | Kein Match → Stadtdurchschnitt | „Lage-spezifische Abweichungen möglich." |
+| 13 | Plausibilität | Bodenwert-Floor in Signal 4 aktiv | „Bodenwert bildet den Mindestpreis. Gebäudewert auf X € geschätzt." |
+| 14 | Invariante | Gesamtwert ≤ Bodenwert | „Invariante-Korrektur: Mindest-Gebäudewert X € addiert." |
+| 15 | KI | LLM-Korrektur angewandt | „KI-Korrektur ({status}): Wert um X% {richtung}." |
+| 16 | Stadtteil | Stadtteil-Match vorhanden | „Marktpreise basieren auf Stadtteil-Daten." |
+| 17 | Stadtteil | Kein Match → Stadtdurchschnitt | „Lage-spezifische Abweichungen möglich." |
 
 ---
 
-## 21. Ausgabeformat
+## 22. Bericht-Objekt (PDFMonkey)
+
+Implementierung: `buildBericht()` in `src/index.ts`
+
+Das `bericht`-Objekt wird **nach allen Korrekturschleifen** (Plausibilität + KI-Validierung) erzeugt und enthält die finalen Werte in einem flachen Format, das direkt in PDFMonkey-Templates gemappt werden kann.
+
+### Warum ein separates Objekt?
+
+Die detaillierten `bewertung`-, `bodenrichtwert`- und `input_echo`-Objekte sind verschachtelt und enthalten Debug-Informationen. Für den PDF-Report braucht Zapier ein **flaches** Objekt mit lesbaren Werten — ohne Nesting, ohne Score-Nummern, ohne Null-Checks.
+
+### Alle Felder
+
+| Feld | Typ | Beschreibung | Beispiel |
+|------|-----|-------------|----------|
+| **Adresse** | | | |
+| `Strasse` | `string` | Straße + Hausnummer | `"Unter den Linden 1"` |
+| `PLZ` | `string` | Postleitzahl | `"10117"` |
+| `Ort` | `string` | Stadt/Gemeinde | `"Berlin"` |
+| `Bundesland` | `string` | Bundesland | `"Berlin"` |
+| `Stadtteil` | `string` | Stadtteil (wenn verfügbar) | `"Mitte"` |
+| `Standortbeschreibung` | `string` | Fließtext mit Lage + Marktdaten-Quelle | `"Mitte, Berlin. Marktdaten: ..."` |
+| **Immobilie** | | | |
+| `Immobilienart` | `string` | Art der Immobilie | `"Haus"` |
+| `Objektunterart` | `string` | Objekttyp | `"Einfamilienhaus"` |
+| `Baujahr` | `number \| null` | Baujahr | `1985` |
+| `Wohnflaeche` | `number \| null` | Wohnfläche in m² | `138.68` |
+| `Grundstuecksflaeche` | `number \| null` | Grundstücksfläche in m² | `450` |
+| `Modernisierung` | `string` | Lesbarer Text (aus Score konvertiert) | `"Kernsanierung / Neuwertig"` |
+| `Energie` | `string` | Lesbarer Text | `"Sehr gut"` |
+| `Ausstattung` | `string` | Lesbarer Text | `"Gehoben"` |
+| **Preise pro m²** | | | |
+| `Preis_qm` | `number` | Realistischer qm-Preis | `2121` |
+| `QMSpanne_Untergrenze` | `number` | Min qm-Preis | `1909` |
+| `QMSpanne_Mittelwert` | `number` | = `Preis_qm` | `2121` |
+| `QMSpanne_Obergrenze` | `number` | Max qm-Preis | `2333` |
+| **Gesamtpreise** | | | |
+| `Preis` | `number` | Realistischer Gesamtwert | `275000` |
+| `Spanne_Untergrenze` | `number` | Min Gesamtwert | `247500` |
+| `Spanne_Mittelwert` | `number` | = `Preis` | `275000` |
+| `Spanne_Obergrenze` | `number` | Max Gesamtwert | `302500` |
+| **Wertkomponenten** | | | |
+| `Bodenwert` | `number` | BRW × Grundstücksfläche | `42500` |
+| `Gebaeudewert` | `number` | Gesamtwert − Bodenwert | `232500` |
+| `Ertragswert` | `number \| null` | Ertragswert (wenn berechnet) | `289000` |
+| **Bodenrichtwert** | | | |
+| `Bodenrichtwert` | `number` | BRW in €/m² | `85` |
+| `Bodenrichtwert_Stichtag` | `string` | Stichtag des BRW | `"2024-01-01"` |
+| `Bodenrichtwert_Zone` | `string` | BRW-Zone | `"Simmern Kernstadt"` |
+| `Bodenrichtwert_Nutzungsart` | `string` | Nutzungsart | `"Wohnbaufläche"` |
+| `Bodenrichtwert_Quelle` | `string` | Datenquelle | `"BORIS-RP"` |
+| `Bodenrichtwert_Confidence` | `string` | Lesbarer Confidence-Text | `"Offiziell (BORIS)"` |
+| **Qualität** | | | |
+| `BKI_Ampelklasse` | `string` | Farbcode für Report | `"gruen"` / `"gelb"` / `"rot"` |
+| `Konfidenz` | `string` | Konfidenz-Level | `"hoch"` / `"mittel"` / `"gering"` |
+| `Bewertungsmethode` | `string` | Verwendete Methode | `"sachwert-lite"` |
+
+### Score-zu-Label Konvertierung
+
+Scores (1-5) werden automatisch in lesbare Texte umgewandelt:
+
+| Score | Modernisierung | Energie | Ausstattung |
+|-------|---------------|---------|-------------|
+| 5 | Kernsanierung / Neuwertig | Sehr gut | Stark gehoben |
+| 4 | Umfassend modernisiert | Gut | Gehoben |
+| 3 | Teilweise modernisiert | Durchschnittlich | Mittel |
+| 2 | Nur einzelne Maßnahmen | Eher schlecht | Einfach |
+| 1 | Keine Modernisierungen | Sehr schlecht | Schlecht |
+
+Werden Text-Beschreibungen statt Scores gesendet, werden diese direkt übernommen.
+
+### BKI_Ampelklasse Mapping
+
+| Konfidenz | Ampelfarbe | Bedeutung |
+|-----------|-----------|-----------|
+| `hoch` | `gruen` | Gute Datenlage, hohe Zuverlässigkeit |
+| `mittel` | `gelb` | Eingeschränkte Daten oder Schätzwerte |
+| `gering` | `rot` | Geschätzte Werte, Vorsicht geboten |
+
+### Bodenrichtwert_Confidence
+
+| Quelle | Label |
+|--------|-------|
+| Offizieller BORIS-WFS | `"Offiziell (BORIS)"` |
+| ImmoScout-basierte Schätzung | `"Schätzwert (ImmoScout-basiert)"` |
+| KI-Recherche via Web-Suche | `"KI-Recherche (geschätzt)"` |
+| Kein BRW verfügbar | `"Nicht verfügbar"` |
+
+### Zapier-Mapping
+
+In Zapier kann jedes Feld direkt gemappt werden:
+
+```
+PDFMonkey-Variable  →  Zapier-Path
+Preis               →  bericht.Preis
+QMSpanne_Untergrenze→  bericht.QMSpanne_Untergrenze
+Modernisierung      →  bericht.Modernisierung
+BKI_Ampelklasse     →  bericht.BKI_Ampelklasse
+Bodenrichtwert      →  bericht.Bodenrichtwert
+...
+```
+
+Alle Felder sind **immer** vorhanden (mit Fallback-Werten wie `""`, `0` oder `"Nicht angegeben"`), sodass Zapier-Mappings nie fehlschlagen.
+
+---
+
+## 23. Ausgabeformat
 
 ### Bewertung-Objekt
 
@@ -826,6 +1004,7 @@ interface ValidationResult {
 | `BORIS-NRW Immobilienrichtwerte` | IRW Cross-Validation (nur NRW) |
 | `Landesdurchschnitt {Bundesland}` | NHK-Kalibrierung ohne IS24 |
 | `Plausibilitätsprüfung (Auto-Korrektur)` | 4-Signal-Korrektur angewandt |
+| `KI-Recherche (Web-Suche)` | Synthetischer BRW/Marktdaten aus Web-Recherche |
 | `KI-Validierung (claude-sonnet-4-5-20250929)` | LLM-Korrektur angewandt |
 
 ---
@@ -835,11 +1014,17 @@ interface ValidationResult {
 ```
 POST /api/enrich (mit wohnflaeche, baujahr, etc.)
   │
+  ├─ Geocoding (Nominatim) → lat/lon + Bundesland + Stadt + Stadtteil
+  │
   ├─ Parallel starten:
-  │   ├─ ImmoScout City → Slug-Varianten → Landkreis → IS24-Suche → District
+  │   ├─ BRW: State Router → WFS-Adapter → Bodenrichtwert
+  │   ├─ IS24: Stadt-Atlas → Slug-Varianten → Landkreis → IS24-Suche → District
   │   ├─ Bundesbank Preisindex
   │   ├─ Destatis Baupreisindex
   │   └─ NRW IRW (nur Nordrhein-Westfalen)
+  │
+  ├─ KI-Recherche (wenn BRW oder IS24 fehlen)
+  │   └─ Claude + Web-Search → Synthetischer BRW + Marktdaten
   │
   ├─ Gate: wohnflaeche vorhanden?  ──── Nein ──→ bewertung: null
   │
@@ -865,10 +1050,12 @@ POST /api/enrich (mit wohnflaeche, baujahr, etc.)
   ├─ Ertragswert berechnen (wenn Mietdaten vorhanden)
   │
   ├─ Plausibilitätsprüfung (4 Signale, max 3 Iterationen)
-  │   ├─ Gebäudewert/m² im NHK-Bereich?
-  │   ├─ Ertragswert-Abgleich (graduierter Pull)
-  │   ├─ Bodenwertanteil < 70%?
-  │   └─ qm-Preis im Landesrahmen?
+  │   ├─ Signal 1: Gebäudewert/m² im NHK-Bereich?
+  │   ├─ Signal 2: Ertragswert-Abgleich (graduierter Pull)
+  │   ├─ Signal 3: Bodenwertanteil < 70%?
+  │   └─ Signal 4: qm-Preis im Landesrahmen? (mit Bodenwert-Floor)
+  │
+  ├─ Finale Invariante: Gesamtwert ≥ Bodenwert + Mindest-Gebäudewert
   │
   ├─ Cross-Validation (Marktpreis + NRW IRW)
   │
@@ -882,5 +1069,7 @@ POST /api/enrich (mit wohnflaeche, baujahr, etc.)
   ├─ KI-Auto-Korrektur (wenn auffällig/unplausibel + empfohlener_wert)
   │   └─ Graduierter Blend (30% oder 50% Richtung LLM)
   │
-  └─ Response: bewertung + validation
+  ├─ buildBericht() → flaches PDFMonkey-Objekt mit finalen Werten
+  │
+  └─ Response: bewertung + validation + bericht + research
 ```
