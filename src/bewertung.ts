@@ -22,6 +22,7 @@ import { calcGebaeudewertNHK } from './utils/nhk.js';
 import type { NRWImmobilienrichtwert } from './utils/nrw-irw.js';
 import { calcErtragswert } from './utils/ertragswert.js';
 import type { BaupreisindexResult } from './utils/destatis.js';
+import { parseZustandScore, ZUSTAND_LABELS } from './types/index.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -34,6 +35,8 @@ export interface BewertungInput {
   modernisierung: string | null;
   energie: string | null;
   ausstattung: string | null;
+  /** Gebäudezustand 1–5: 1=Sanierungsbedarf … 5=Neuwertig. Fallback für modernisierung. */
+  zustand: string | null;
 }
 
 export interface BewertungFaktoren {
@@ -629,10 +632,44 @@ export function buildBewertung(
   let grundflaeche = input.grundstuecksflaeche || 0;
   let grundflaecheGeschaetzt = false;
 
+  // ─── Zustand → effectiveModernisierung ──────────────────────────────────────
+  // Gebäudezustand (1–5) und Modernisierungsgrad (1–5) teilen dieselbe Score-Skala.
+  //
+  // Strategie:
+  //   • Nur zustand     → zustand als direkter Proxy (Fallback)
+  //   • Nur modernisierung → unverändert
+  //   • Beide numerisch → 70 % modernisierung + 30 % zustand (Blend)
+  //     Modernisierung ist spezifischer (was wurde gemacht), zustand ergänzt
+  //     den aktuellen Pflegezustand (wie sieht es jetzt aus).
+  //   • modernisierung als Text + zustand → Text bleibt, zustand wird ignoriert
+  //     (Text enthält mehr Semantik und würde durch Blend verloren gehen)
+  const zustandScore = parseZustandScore(input.zustand);
+  let effectiveModernisierung = input.modernisierung;
+
+  if (effectiveModernisierung == null && zustandScore != null) {
+    // Fall 1: Nur Zustand → als Proxy
+    effectiveModernisierung = String(zustandScore);
+    validationHinweise.push(
+      `Gebäudezustand "${ZUSTAND_LABELS[zustandScore]}" (Score ${zustandScore}) als Modernisierungs-Proxy verwendet.`,
+    );
+  } else if (effectiveModernisierung != null && zustandScore != null) {
+    // Fall 2: Beide vorhanden → Blend wenn modernisierung numerisch
+    const modNum = Number(effectiveModernisierung);
+    if (!isNaN(modNum) && modNum >= 1 && modNum <= 5) {
+      const blended = Math.round((modNum * 0.7 + zustandScore * 0.3) * 10) / 10;
+      effectiveModernisierung = String(blended);
+      validationHinweise.push(
+        `Modernisierung (Score ${modNum}) + Gebäudezustand "${ZUSTAND_LABELS[zustandScore]}" (Score ${zustandScore}) → kombinierter Score ${blended}.`,
+      );
+    }
+    // Fall 3: modernisierung als Text → Text behalten, zustand fließt nicht ein
+    // (Text-basierte Modernisierung enthält bereits volle Semantik)
+  }
+
   // Faktoren berechnen
   const faktoren: BewertungFaktoren = {
     baujahr: calcBaujahrFaktor(input.baujahr, lageCluster),
-    modernisierung: calcModernisierungFaktor(input.modernisierung, input.baujahr, lageCluster),
+    modernisierung: calcModernisierungFaktor(effectiveModernisierung, input.baujahr, lageCluster),
     energie: calcEnergieFaktor(input.energie),
     ausstattung: calcAusstattungFaktor(input.ausstattung),
     objektunterart: calcObjektunterartFaktor(input.objektunterart),
@@ -792,7 +829,7 @@ export function buildBewertung(
 
     const nhk = calcGebaeudewertNHK(
       wohnflaeche, input.baujahr,
-      input.objektunterart, input.ausstattung, input.modernisierung,
+      input.objektunterart, input.ausstattung, effectiveModernisierung,
       istHaus, brw!.wert, externalBpi, bundesland,
     );
     const nhkSachwert = bodenwert + nhk.gebaeudewert;

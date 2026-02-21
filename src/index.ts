@@ -9,6 +9,7 @@ import { cache, immoCache } from './cache.js';
 import { buildEnrichment } from './enrichment.js';
 import { buildBewertung } from './bewertung.js';
 import type { Bewertung, BewertungInput } from './bewertung.js';
+import { ZUSTAND_LABELS, parseZustandScore } from './types/index.js';
 import { validateBewertung, applyLLMCorrection, clearValidationCache, validationCacheStats } from './llm-validator.js';
 import type { ValidationResult } from './llm-validator.js';
 import { scrapeImmoScoutAtlas, scrapeImmoScoutDistricts, scrapeImmoScoutSearch, buildSearchKreisSlug, slugify, normalizeCityForIS24, generateCitySlugVariants } from './utils/immoscout-scraper.js';
@@ -304,6 +305,7 @@ function parseBewertungInput(body: Record<string, any>): BewertungInput {
     modernisierung: body.modernisierung || null,
     energie: body.energie || null,
     ausstattung: body.ausstattung || null,
+    zustand: body.zustand != null ? String(body.zustand) : null,
   };
 }
 
@@ -449,6 +451,7 @@ function buildBericht(
       modernisierung: string | null;
       energie: string | null;
       ausstattung: string | null;
+      zustand: string | null;
     };
   },
   brw: NormalizedBRW | null,
@@ -534,6 +537,10 @@ function buildBericht(
     Modernisierung: scoreToLabel(inputEcho.bewertungsparameter.modernisierung, modScoreLabels),
     Energie: scoreToLabel(inputEcho.bewertungsparameter.energie, energieScoreLabels),
     Ausstattung: scoreToLabel(inputEcho.bewertungsparameter.ausstattung, ausstattungScoreLabels),
+    Zustand: (() => {
+      const s = parseZustandScore(inputEcho.bewertungsparameter.zustand);
+      return s != null ? `${ZUSTAND_LABELS[s]} (${s})` : 'Nicht angegeben';
+    })(),
 
     // ─── Preise pro m² ───
     Preis_qm: bewertung.realistischer_qm_preis,
@@ -610,6 +617,7 @@ app.post('/api/enrich', async (c) => {
         modernisierung: body.modernisierung || null,
         energie: body.energie || null,
         ausstattung: body.ausstattung || null,
+        zustand: body.zustand != null ? String(body.zustand) : null,
       },
     };
 
@@ -833,7 +841,7 @@ app.get('/api/health', (c) => {
 // ==========================================
 app.get('/api/optionen', (c) => {
   return c.json({
-    hinweis: 'Für modernisierung, energie, ausstattung können alternativ numerische Scores 1–5 gesendet werden.',
+    hinweis: 'Für modernisierung, energie, ausstattung, zustand können alternativ numerische Scores 1–5 gesendet werden.',
     modernisierung: [
       { wert: 'Kernsanierung / Neuwertig', score: 5 },
       { wert: 'Umfassend modernisiert',    score: 4 },
@@ -854,6 +862,13 @@ app.get('/api/optionen', (c) => {
       { wert: 'Mittel',        score: 3 },
       { wert: 'Einfach',       score: 2 },
       { wert: 'Schlecht',      score: 1 },
+    ],
+    zustand: [
+      { wert: 'Neuwertig',          score: 5 },
+      { wert: 'Gut',                score: 4 },
+      { wert: 'Gepflegt',           score: 3 },
+      { wert: 'Renovierungsbedarf', score: 2 },
+      { wert: 'Sanierungsbedarf',   score: 1 },
     ],
     objektunterart: [
       'Freistehendes Einfamilienhaus',
