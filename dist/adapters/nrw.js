@@ -1,30 +1,38 @@
 /**
  * Nordrhein-Westfalen Adapter
  *
- * Nutzt den BORIS-NRW WMS GetFeatureInfo-Endpunkt.
+ * Nutzt den BORIS-NRW WMS GetFeatureInfo-Endpunkt (ESRI ArcGIS Server).
  * NRW bietet keinen öffentlichen WFS, nur WMS.
  * WMS: https://www.wms.nrw.de/boris/wms_nw_brw (aktueller Jahrgang)
  * WMS-T: https://www.wms.nrw.de/boris/wms-t_nw_brw (ab 2011)
+ *
+ * ESRI-WMS liefert GetFeatureInfo als <FIELDS attr="val" /> Attribut-Format.
+ * Layer-IDs können numerisch ("5") oder benannt ("brw_ein_zweigeschossig") sein.
+ *
  * Lizenz: Datenlizenz Deutschland – Zero – Version 2.0
  */
 export class NRWAdapter {
     state = 'Nordrhein-Westfalen';
     stateCode = 'NW';
     isFallback = false;
-    // WMS Endpunkte (aktuell zuerst, dann time-enabled als Fallback)
     wmsEndpoints = [
         'https://www.wms.nrw.de/boris/wms_nw_brw',
         'https://www.wms.nrw.de/boris/wms-t_nw_brw',
     ];
-    // Layer-Kandidaten (typische NRW Namenskonventionen)
-    layerCandidates = [
+    // Bekannte NRW BRW Layer-Namen (beide Namenskonventionen: benannt + offiziell)
+    knownLayers = [
+        'brw_ein_zweigeschossig',
+        'brw_mehrgeschossige_bauweise',
+        'BRW_Wohngebiete',
+        'BRW_Mischgebiete',
+        'BRW_Gewerbegebiete',
+        'BRW_Sonderflaechen',
+        'BRW_Sonstige_Flaechen',
+        'Bodenrichtwerte',
+        'Bodenrichtwertzonen',
         'brw',
         'BRW',
         'bodenrichtwerte',
-        'Bodenrichtwerte',
-        'nw_brw',
-        'boris',
-        'Bodenrichtwertzonen',
     ];
     // Cache für entdeckte Layer
     discoveredLayers = {};
@@ -44,38 +52,48 @@ export class NRWAdapter {
     }
     async queryEndpoint(lat, lon, wmsUrl) {
         // Layer-Discovery per GetCapabilities (nur beim ersten Mal)
-        let layers = this.discoveredLayers[wmsUrl];
-        if (!layers) {
-            layers = await this.discoverLayers(wmsUrl);
-            this.discoveredLayers[wmsUrl] = layers;
-            console.log(`NRW WMS: Discovered layers for ${wmsUrl}:`, layers);
-        }
-        // Falls keine Layer entdeckt, versuche Kandidaten
-        const layersToTry = layers.length > 0 ? layers : this.layerCandidates;
-        for (const layer of layersToTry) {
-            // Versuche text/xml
-            try {
-                const result = await this.queryWmsLayer(lat, lon, wmsUrl, layer, 'text/xml');
-                if (result)
-                    return result;
+        let discovered = this.discoveredLayers[wmsUrl];
+        if (!discovered) {
+            discovered = await this.discoverLayers(wmsUrl);
+            this.discoveredLayers[wmsUrl] = discovered;
+            if (discovered.length > 0) {
+                console.log(`NRW WMS: Discovered layers for ${wmsUrl}:`, discovered);
             }
-            catch { /* next */ }
-            // Versuche text/html
+        }
+        // Bekannte Layer zuerst, dann entdeckte (ohne Duplikate)
+        const seen = new Set();
+        const layersToTry = [];
+        for (const l of [...this.knownLayers, ...discovered]) {
+            if (!seen.has(l)) {
+                seen.add(l);
+                layersToTry.push(l);
+            }
+        }
+        // Phase 1: Alle Layer parallel mit text/xml (ESRI-Standardformat)
+        const xmlResults = await Promise.allSettled(layersToTry.map(layer => this.queryWmsXml(lat, lon, wmsUrl, layer)));
+        for (const result of xmlResults) {
+            if (result.status === 'fulfilled' && result.value)
+                return result.value;
+        }
+        // Phase 2: HTML-Fallback nur für die ersten 3 Layer (falls XML-Format nicht unterstützt)
+        for (const layer of layersToTry.slice(0, 3)) {
             try {
                 const result = await this.queryWmsLayer(lat, lon, wmsUrl, layer, 'text/html');
                 if (result)
                     return result;
             }
             catch { /* next */ }
-            // Versuche application/json (manche WMS unterstützen das)
-            try {
-                const result = await this.queryWmsLayer(lat, lon, wmsUrl, layer, 'application/json');
-                if (result)
-                    return result;
-            }
-            catch { /* next */ }
         }
         return null;
+    }
+    /** Schnelle XML-Abfrage mit Early-Return bei leerer ESRI-Response */
+    async queryWmsXml(lat, lon, wmsUrl, layer) {
+        try {
+            return await this.queryWmsLayer(lat, lon, wmsUrl, layer, 'text/xml');
+        }
+        catch {
+            return null;
+        }
     }
     /** GetCapabilities abfragen um verfügbare Layer zu finden */
     async discoverLayers(wmsUrl) {
@@ -92,22 +110,16 @@ export class NRWAdapter {
             if (!res.ok)
                 return [];
             const xml = await res.text();
-            // Queryable Layer-Namen extrahieren
+            // Alle <Name>-Tags innerhalb von <Layer>-Blöcken extrahieren
+            // ESRI WMS kann numerische ("5") oder benannte ("brw_ein_zweigeschossig") IDs haben
             const layers = [];
-            // Match <Layer queryable="1"> ... <Name>layerName</Name>
-            const layerRegex = /<Layer[^>]*queryable=["']1["'][^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
+            const nameRegex = /<Layer[^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
             let match;
-            while ((match = layerRegex.exec(xml)) !== null) {
-                layers.push(match[1].trim());
-            }
-            // Falls keine queryable gefunden, alle Layer-Namen nehmen
-            if (layers.length === 0) {
-                const nameRegex = /<Layer[^>]*>\s*<Name>([^<]+)<\/Name>/g;
-                while ((match = nameRegex.exec(xml)) !== null) {
-                    const name = match[1].trim();
-                    if (name && !name.includes('WMS') && !name.includes('Service')) {
-                        layers.push(name);
-                    }
+            while ((match = nameRegex.exec(xml)) !== null) {
+                const name = match[1].trim();
+                // Root-Layer und Service-Meta überspringen
+                if (name && !name.includes('WMS') && !name.includes('Service') && name !== '0') {
+                    layers.push(name);
                 }
             }
             return layers;
@@ -118,7 +130,6 @@ export class NRWAdapter {
         }
     }
     async queryWmsLayer(lat, lon, wmsUrl, layer, infoFormat) {
-        // WMS 1.3.0: CRS=EPSG:4326 → Achsenreihenfolge lat,lon
         const delta = 0.001;
         const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta}`;
         const params = new URLSearchParams({
@@ -140,18 +151,19 @@ export class NRWAdapter {
         });
         const res = await fetch(`${wmsUrl}?${params}`, {
             headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-            signal: AbortSignal.timeout(10000),
+            signal: AbortSignal.timeout(8000),
         });
         if (!res.ok)
             return null;
         const text = await res.text();
-        // Leere Antworten oder Fehler
+        // Leere/ungültige Antworten früh filtern
         if (!text || text.length < 20)
             return null;
         if (text.includes('ServiceException') || text.includes('ExceptionReport'))
             return null;
-        // Debug bei erstem Treffer
-        console.log(`NRW WMS [${layer}/${infoFormat}] response (500 chars):`, text.substring(0, 500));
+        if (this.isEmptyResponse(text))
+            return null;
+        console.log(`NRW WMS [${layer}/${infoFormat}]: Daten gefunden (${text.length} bytes)`);
         if (infoFormat === 'application/json') {
             return this.parseJsonResponse(text, layer);
         }
@@ -162,6 +174,22 @@ export class NRWAdapter {
             return this.parseHtmlResponse(text, layer);
         }
     }
+    /**
+     * Erkennt leere ESRI WMS-Responses:
+     * - Selbstschließendes XML: <FeatureInfoResponse ... />
+     * - HTML nur mit CSS/Boilerplate ohne Tabellendaten
+     */
+    isEmptyResponse(text) {
+        // ESRI leere XML-Response: selbstschließendes <FeatureInfoResponse/>
+        if (text.includes('FeatureInfoResponse') && !text.includes('FIELDS') && !text.includes('<gml:')) {
+            return true;
+        }
+        // HTML-Response ohne Daten: nur CSS-Boilerplate, keine <td>-Zellen mit Inhalt
+        if (text.includes('<html') && !text.includes('<td')) {
+            return true;
+        }
+        return false;
+    }
     parseJsonResponse(text, layer) {
         try {
             const json = JSON.parse(text);
@@ -170,16 +198,16 @@ export class NRWAdapter {
                 return null;
             const wohn = features.find((f) => (f.properties?.nutzungsart || '').startsWith('W')) || features[0];
             const p = wohn.properties;
-            const wert = p.brw || p.BRW || p.bodenrichtwert || p.wert || p.richtwert || 0;
+            const wert = p.brw || p.BRW || p.bodenrichtwert || p.Bodenrichtwert || p.wert || p.richtwert || 0;
             if (!wert || wert <= 0)
                 return null;
             return {
                 wert,
-                stichtag: p.stichtag || p.STICHTAG || 'aktuell',
-                nutzungsart: p.nutzungsart || p.NUTZUNGSART || 'unbekannt',
+                stichtag: p.stichtag || p.STICHTAG || p.Stichtag || 'aktuell',
+                nutzungsart: p.nutzungsart || p.NUTZUNGSART || p.Nutzungsart || 'unbekannt',
                 entwicklungszustand: p.entwicklungszustand || p.ENTWICKLUNGSZUSTAND || 'B',
                 zone: p.brw_zone || p.zone || p.lage || '',
-                gemeinde: p.gemeinde || p.gemeinde_name || p.ort || '',
+                gemeinde: p.gemeinde || p.gemeinde_name || p.Gemeinde || p.ort || '',
                 bundesland: 'Nordrhein-Westfalen',
                 quelle: 'BORIS-NRW',
                 lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
@@ -200,20 +228,18 @@ export class NRWAdapter {
             stichtag: this.extractFieldFromXml(xml, ['stichtag', 'STICHTAG', 'Stichtag']) || 'aktuell',
             nutzungsart: this.extractFieldFromXml(xml, ['nutzungsart', 'NUTZUNGSART', 'Nutzungsart']) || 'unbekannt',
             entwicklungszustand: this.extractFieldFromXml(xml, ['entwicklungszustand', 'ENTWICKLUNGSZUSTAND']) || 'B',
-            zone: this.extractFieldFromXml(xml, ['brw_zone', 'zone', 'lage']) || '',
-            gemeinde: this.extractFieldFromXml(xml, ['gemeinde', 'Gemeinde', 'ort', 'name']) || '',
+            zone: this.extractFieldFromXml(xml, ['brw_zone', 'zone', 'lage', 'Bemerkung', 'bemerkung']) || '',
+            gemeinde: this.extractFieldFromXml(xml, ['gemeinde', 'Gemeinde', 'ort', 'Gemeindename']) || '',
             bundesland: 'Nordrhein-Westfalen',
             quelle: 'BORIS-NRW',
             lizenz: 'Datenlizenz Deutschland – Zero – Version 2.0',
         };
     }
     parseHtmlResponse(html, layer) {
-        // HTML-Tags und CSS entfernen für Textsuche
         const plainText = html
             .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
             .replace(/<[^>]+>/g, ' ')
             .replace(/\s+/g, ' ');
-        // EUR/m²-Wert aus HTML/Text extrahieren
         const patterns = [
             /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m²|€\/m²|EUR\/qm|€\/qm|EUR\/m&sup2;)/i,
             /(?:Bodenrichtwert|BRW|Richtwert)[:\s]*(\d+(?:[.,]\d+)?)/i,
@@ -221,7 +247,6 @@ export class NRWAdapter {
         ];
         let wert = null;
         for (const pattern of patterns) {
-            // Versuche in beiden Varianten (original HTML und stripped text)
             const match = html.match(pattern) || plainText.match(pattern);
             if (match) {
                 wert = parseFloat(match[1].replace(',', '.'));
@@ -231,11 +256,8 @@ export class NRWAdapter {
         }
         if (!wert || wert <= 0)
             return null;
-        // Stichtag aus HTML/Text
         const stichtagMatch = plainText.match(/(?:Stichtag|stichtag)[:\s]*(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})/i);
-        // Gemeinde aus reinem Text extrahieren (kein CSS-Müll)
         const gemeindeMatch = plainText.match(/(?:Gemeinde|Gemeindename)[:\s]+([A-ZÄÖÜa-zäöüß][A-ZÄÖÜa-zäöüß\s\-]+)/);
-        // Nutzungsart
         const nutzungsartMatch = plainText.match(/(?:Nutzungsart|nutzung)[:\s]*([A-Za-zÄÖÜäöü\s]+?)(?:\s{2,}|\s*$)/i);
         return {
             wert,
@@ -259,7 +281,7 @@ export class NRWAdapter {
                 if (val !== null)
                     return val;
             }
-            // 2) Attribut-Format: Bodenrichtwert="630" (NRW FIELDS-Style)
+            // 2) Attribut-Format: Bodenrichtwert="630" (ESRI FIELDS-Style)
             const attrRe = new RegExp(`\\b${field}="([\\d.,]+)"`, 'i');
             const attrMatch = xml.match(attrRe);
             if (attrMatch) {
@@ -284,7 +306,7 @@ export class NRWAdapter {
             const tagMatch = xml.match(tagRe);
             if (tagMatch)
                 return tagMatch[1].trim();
-            // 2) Attribut-Format: Stichtag="01.01.2024" (NRW FIELDS-Style)
+            // 2) Attribut-Format: Stichtag="01.01.2024" (ESRI FIELDS-Style)
             const attrRe = new RegExp(`\\b${field}="([^"]*)"`, 'i');
             const attrMatch = xml.match(attrRe);
             if (attrMatch && attrMatch[1].trim())

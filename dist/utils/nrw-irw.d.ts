@@ -7,6 +7,9 @@
  *
  * Teilmärkte: EFH, ZFH, RDH (Reihen-/Doppelhaus), ETW, MFH
  *
+ * ESRI-WMS liefert GetFeatureInfo als <FIELDS attr="val" /> Attribut-Format.
+ * Layer-IDs können numerisch ("7") oder benannt ("irw_efh") sein.
+ *
  * Datenquelle: https://www.wms.nrw.de/boris/wms_nw_irw
  * Lizenz: Datenlizenz Deutschland – Zero – Version 2.0
  */

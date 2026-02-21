@@ -7,6 +7,9 @@
  *
  * Teilmärkte: EFH, ZFH, RDH (Reihen-/Doppelhaus), ETW, MFH
  *
+ * ESRI-WMS liefert GetFeatureInfo als <FIELDS attr="val" /> Attribut-Format.
+ * Layer-IDs können numerisch ("7") oder benannt ("irw_efh") sein.
+ *
  * Datenquelle: https://www.wms.nrw.de/boris/wms_nw_irw
  * Lizenz: Datenlizenz Deutschland – Zero – Version 2.0
  */
@@ -15,13 +18,15 @@ const WMS_ENDPOINTS = [
     'https://www.wms.nrw.de/boris/wms_nw_irw',
     'https://www.wms.nrw.de/boris/wms-t_nw_irw',
 ];
-const LAYER_CANDIDATES = [
-    'irw',
+// Bekannte NRW IRW Layer-Namen (beide Namenskonventionen)
+const KNOWN_LAYERS = [
     'IRW',
-    'immobilienrichtwerte',
+    'irw',
+    'IRWZ',
     'Immobilienrichtwerte',
-    'nw_irw',
+    'immobilienrichtwerte',
     'Immobilienrichtwertzonen',
+    'nw_irw',
 ];
 // Layer-Discovery-Cache
 let _discoveredLayers = {};
@@ -51,26 +56,48 @@ export async function fetchImmobilienrichtwert(lat, lon, teilmarktFilter) {
 // ─── WMS Queries ────────────────────────────────────────────────────────────
 async function queryIrwEndpoint(lat, lon, wmsUrl, teilmarktFilter) {
     // Layer-Discovery
-    let layers = _discoveredLayers[wmsUrl];
-    if (!layers) {
-        layers = await discoverLayers(wmsUrl);
-        _discoveredLayers[wmsUrl] = layers;
-        if (layers.length > 0) {
-            console.log(`NRW IRW: Discovered layers for ${wmsUrl}:`, layers);
+    let discovered = _discoveredLayers[wmsUrl];
+    if (!discovered) {
+        discovered = await discoverLayers(wmsUrl);
+        _discoveredLayers[wmsUrl] = discovered;
+        if (discovered.length > 0) {
+            console.log(`NRW IRW: Discovered layers for ${wmsUrl}:`, discovered);
         }
     }
-    const layersToTry = layers.length > 0 ? layers : LAYER_CANDIDATES;
-    for (const layer of layersToTry) {
-        for (const format of ['text/xml', 'text/html', 'application/json']) {
-            try {
-                const result = await queryWmsLayer(lat, lon, wmsUrl, layer, format, teilmarktFilter);
-                if (result)
-                    return result;
-            }
-            catch { /* next format/layer */ }
+    // Bekannte Layer zuerst, dann entdeckte (ohne Duplikate)
+    const seen = new Set();
+    const layersToTry = [];
+    for (const l of [...KNOWN_LAYERS, ...discovered]) {
+        if (!seen.has(l)) {
+            seen.add(l);
+            layersToTry.push(l);
         }
+    }
+    // Phase 1: Alle Layer parallel mit text/xml (ESRI-Standardformat)
+    const xmlResults = await Promise.allSettled(layersToTry.map(layer => queryWmsXml(lat, lon, wmsUrl, layer, teilmarktFilter)));
+    for (const result of xmlResults) {
+        if (result.status === 'fulfilled' && result.value)
+            return result.value;
+    }
+    // Phase 2: HTML-Fallback nur für die ersten 3 Layer
+    for (const layer of layersToTry.slice(0, 3)) {
+        try {
+            const result = await queryWmsLayer(lat, lon, wmsUrl, layer, 'text/html', teilmarktFilter);
+            if (result)
+                return result;
+        }
+        catch { /* next */ }
     }
     return null;
+}
+/** Schnelle XML-Abfrage mit Error-Handling */
+async function queryWmsXml(lat, lon, wmsUrl, layer, teilmarktFilter) {
+    try {
+        return await queryWmsLayer(lat, lon, wmsUrl, layer, 'text/xml', teilmarktFilter);
+    }
+    catch {
+        return null;
+    }
 }
 async function discoverLayers(wmsUrl) {
     try {
@@ -86,21 +113,14 @@ async function discoverLayers(wmsUrl) {
         if (!res.ok)
             return [];
         const xml = await res.text();
+        // Alle <Name>-Tags innerhalb von <Layer>-Blöcken extrahieren
         const layers = [];
-        // Queryable Layer
-        const queryableRegex = /<Layer[^>]*queryable=["']1["'][^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
+        const nameRegex = /<Layer[^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/g;
         let match;
-        while ((match = queryableRegex.exec(xml)) !== null) {
-            layers.push(match[1].trim());
-        }
-        // Fallback: alle Layer-Namen
-        if (layers.length === 0) {
-            const nameRegex = /<Layer[^>]*>\s*<Name>([^<]+)<\/Name>/g;
-            while ((match = nameRegex.exec(xml)) !== null) {
-                const name = match[1].trim();
-                if (name && !name.includes('WMS') && !name.includes('Service')) {
-                    layers.push(name);
-                }
+        while ((match = nameRegex.exec(xml)) !== null) {
+            const name = match[1].trim();
+            if (name && !name.includes('WMS') && !name.includes('Service') && name !== '0') {
+                layers.push(name);
             }
         }
         return layers;
@@ -110,8 +130,21 @@ async function discoverLayers(wmsUrl) {
         return [];
     }
 }
+/**
+ * Erkennt leere ESRI WMS-Responses:
+ * - Selbstschließendes XML: <FeatureInfoResponse ... />
+ * - HTML nur mit CSS/Boilerplate ohne Tabellendaten
+ */
+function isEmptyResponse(text) {
+    if (text.includes('FeatureInfoResponse') && !text.includes('FIELDS') && !text.includes('<gml:')) {
+        return true;
+    }
+    if (text.includes('<html') && !text.includes('<td')) {
+        return true;
+    }
+    return false;
+}
 async function queryWmsLayer(lat, lon, wmsUrl, layer, infoFormat, teilmarktFilter) {
-    // WMS 1.3.0: CRS=EPSG:4326 → Achsenreihenfolge lat,lon
     const delta = 0.001;
     const bbox = `${lat - delta},${lon - delta},${lat + delta},${lon + delta}`;
     const params = new URLSearchParams({
@@ -133,7 +166,7 @@ async function queryWmsLayer(lat, lon, wmsUrl, layer, infoFormat, teilmarktFilte
     });
     const res = await fetch(`${wmsUrl}?${params}`, {
         headers: { 'User-Agent': 'BRW-API/1.0 (lebenswert.de)' },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(8000),
     });
     if (!res.ok)
         return null;
@@ -142,7 +175,9 @@ async function queryWmsLayer(lat, lon, wmsUrl, layer, infoFormat, teilmarktFilte
         return null;
     if (text.includes('ServiceException') || text.includes('ExceptionReport'))
         return null;
-    console.log(`NRW IRW [${layer}/${infoFormat}] response (500 chars):`, text.substring(0, 500));
+    if (isEmptyResponse(text))
+        return null;
+    console.log(`NRW IRW [${layer}/${infoFormat}]: Daten gefunden (${text.length} bytes)`);
     let results;
     if (infoFormat === 'application/json') {
         results = parseJsonResponse(text);
@@ -162,7 +197,6 @@ async function queryWmsLayer(lat, lon, wmsUrl, layer, infoFormat, teilmarktFilte
         if (matched)
             return matched;
     }
-    // Erstes Ergebnis zurückgeben
     return results[0];
 }
 // ─── Response-Parser ────────────────────────────────────────────────────────
@@ -175,7 +209,7 @@ function parseJsonResponse(text) {
         return features
             .map((f) => {
             const p = f.properties || {};
-            const irw = p.irw || p.IRW || p.immobilienrichtwert || p.richtwert || p.wert || 0;
+            const irw = p.irw || p.IRW || p.immobilienrichtwert || p.Immobilienrichtwert || p.richtwert || p.wert || 0;
             if (!irw || irw <= 0)
                 return null;
             return {
@@ -214,7 +248,7 @@ function parseXmlResponse(xml) {
                 grundstuecksflaeche: extractNumberFromXml(xml, ['grundstuecksflaeche', 'GRUNDSTUECKSFLAECHE']) ?? undefined,
                 gebaeudeart: extractFieldFromXml(xml, ['gebaeudeart', 'GEBAEUDEART', 'objektunterart']) ?? undefined,
             },
-            gemeinde: extractFieldFromXml(xml, ['gemeinde', 'Gemeinde', 'ort', 'name']) || '',
+            gemeinde: extractFieldFromXml(xml, ['gemeinde', 'Gemeinde', 'ort', 'Gemeindename']) || '',
             quelle: 'BORIS-NRW Immobilienrichtwerte',
         }];
 }
@@ -223,7 +257,6 @@ function parseHtmlResponse(html) {
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ');
-    // IRW-Wert extrahieren (EUR/m² Wohnfläche)
     const patterns = [
         /([\d]+(?:[.,]\d+)?)\s*(?:EUR\/m²|€\/m²|EUR\/qm|€\/qm)/i,
         /(?:Immobilienrichtwert|IRW|Richtwert)[:\s]*(\d+(?:[.,]\d+)?)/i,
@@ -270,7 +303,7 @@ function extractNumberFromXml(xml, fields) {
             if (val !== null)
                 return val;
         }
-        // 2) Attribut-Format: IRW="630" (NRW FIELDS-Style)
+        // 2) Attribut-Format: IRW="630" (ESRI FIELDS-Style)
         const attrRe = new RegExp(`\\b${field}="([\\d.,]+)"`, 'i');
         const attrMatch = xml.match(attrRe);
         if (attrMatch) {
@@ -288,7 +321,7 @@ function extractFieldFromXml(xml, fields) {
         const tagMatch = xml.match(tagRe);
         if (tagMatch)
             return tagMatch[1].trim();
-        // 2) Attribut-Format: Stichtag="01.01.2024" (NRW FIELDS-Style)
+        // 2) Attribut-Format: Stichtag="01.01.2024" (ESRI FIELDS-Style)
         const attrRe = new RegExp(`\\b${field}="([^"]*)"`, 'i');
         const attrMatch = xml.match(attrRe);
         if (attrMatch && attrMatch[1].trim())
