@@ -1052,6 +1052,7 @@ export function buildBewertung(
   //   4. Gesamt-qm-Preis im Landesrahmen? (±80% vom Landesdurchschnitt)
 
   let korrekturAngewandt = false;
+  const appliedSignals = new Set<number>();
 
   for (let iteration = 0; iteration < 3; iteration++) {
     let needsCorrection = false;
@@ -1059,7 +1060,7 @@ export function buildBewertung(
     // Signal 1: Gebäudewert/m² im plausiblen Bereich?
     // NHK 2010 Stufe 1-5: ~490-1260 €/m² BGF × BPI ≈ 910-2340 €/m² BGF aktuell
     // → Gebäudewert/m² Wohnfläche: ~650-3200 (mit BGF-Faktor und AWM)
-    if (istHaus && gebaeudewert > 0 && wohnflaeche > 0) {
+    if (!appliedSignals.has(1) && istHaus && gebaeudewert > 0 && wohnflaeche > 0) {
       const gebWertProQm = gebaeudewert / wohnflaeche;
       const maxPlausibel = 4000; // Stark gehobener Neubau
       if (gebWertProQm > maxPlausibel) {
@@ -1069,13 +1070,14 @@ export function buildBewertung(
         );
         gebaeudewert = Math.round(korrektur);
         realistischerImmobilienwert = bodenwert + gebaeudewert;
+        appliedSignals.add(1);
         needsCorrection = true;
       }
     }
 
     // Signal 2: Ertragswert-Abgleich (stärkste Cross-Validation)
     // Wenn Ertragswert verfügbar und Abweichung >25%, graduiert in Richtung Ertragswert korrigieren
-    if (ertragswertErgebnis && ertragswertErgebnis > 0) {
+    if (!appliedSignals.has(2) && ertragswertErgebnis && ertragswertErgebnis > 0) {
       const ewAbweichung = (realistischerImmobilienwert - ertragswertErgebnis) / ertragswertErgebnis;
       if (Math.abs(ewAbweichung) > 0.25) {
         // Graduierte Korrektur: stärkere Divergenz → stärkerer Pull zum Ertragswert (max 40%)
@@ -1088,12 +1090,13 @@ export function buildBewertung(
         );
         realistischerImmobilienwert = korrigiert;
         gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+        appliedSignals.add(2);
         needsCorrection = true;
       }
     }
 
     // Signal 3: Bodenwertanteil plausibel?
-    if (istHaus && realistischerImmobilienwert > 0 && bodenwert > 0) {
+    if (!appliedSignals.has(3) && istHaus && realistischerImmobilienwert > 0 && bodenwert > 0) {
       const bodenwertAnteil = bodenwert / realistischerImmobilienwert;
       if (bodenwertAnteil > 0.70) {
         // Grundstück dominiert → Gebäudewert zu niedrig oder BRW zu hoch
@@ -1105,13 +1108,14 @@ export function buildBewertung(
           );
           realistischerImmobilienwert = minGesamt;
           gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
+          appliedSignals.add(3);
           needsCorrection = true;
         }
       }
     }
 
     // Signal 4: qm-Preis im Landesrahmen?
-    if (bundesland && realistischerImmobilienwert > 0 && wohnflaeche > 0) {
+    if (!appliedSignals.has(4) && bundesland && realistischerImmobilienwert > 0 && wohnflaeche > 0) {
       const qmAktuell = realistischerImmobilienwert / wohnflaeche;
       const stateAvg = STATE_AVG_QM_PREIS[bundesland];
       if (stateAvg) {
@@ -1124,6 +1128,7 @@ export function buildBewertung(
           hinweise.push(
             `Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) unter Minimum für ${bundesland}. Auf ${Math.round(untergrenze)} €/m² angehoben.`,
           );
+          appliedSignals.add(4);
           needsCorrection = true;
         } else if (qmAktuell > obergrenze) {
           realistischerImmobilienwert = Math.round(obergrenze * wohnflaeche);
@@ -1131,6 +1136,7 @@ export function buildBewertung(
           hinweise.push(
             `Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) über Maximum für ${bundesland}. Auf ${Math.round(obergrenze)} €/m² reduziert.`,
           );
+          appliedSignals.add(4);
           needsCorrection = true;
         }
       }
