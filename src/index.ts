@@ -20,6 +20,8 @@ import { fetchImmobilienrichtwert } from './utils/nrw-irw.js';
 import type { NRWImmobilienrichtwert } from './utils/nrw-irw.js';
 import { fetchBaupreisindex } from './utils/destatis.js';
 import type { BaupreisindexResult } from './utils/destatis.js';
+import { checkResearchTriggers, performResearch, clearResearchCache, researchCacheStats } from './utils/ai-research.js';
+import type { ResearchResult } from './utils/ai-research.js';
 
 const app = new Hono();
 
@@ -326,6 +328,99 @@ function buildBewertungFromContext(
 }
 
 // ==========================================
+// KI-Recherche bei schlechter Datenlage
+// ==========================================
+
+/**
+ * Prüft ob KI-Recherche nötig ist und führt sie ggf. durch.
+ * Nutzt Recherche-Ergebnisse um fehlende BRW/Marktdaten zu synthetisieren.
+ */
+async function maybeEnrichWithResearch(
+  brw: NormalizedBRW | null,
+  marktdaten: ImmoScoutPrices | null,
+  bundesland: string,
+  adresse: string,
+  body: Record<string, any>,
+): Promise<{
+  research: ResearchResult | null;
+  enrichedBrw: NormalizedBRW | null;
+  enrichedMarktdaten: ImmoScoutPrices | null;
+}> {
+  const triggers = checkResearchTriggers(brw, marktdaten, bundesland);
+  if (triggers.length === 0) {
+    return { research: null, enrichedBrw: brw, enrichedMarktdaten: marktdaten };
+  }
+
+  console.log(`KI-Recherche gestartet (${triggers.length} Trigger: ${triggers.map(t => t.reason).join(', ')})`);
+
+  const research = await performResearch(
+    adresse,
+    bundesland,
+    body.art || null,
+    body.objektunterart || null,
+    parseNum(body.wohnflaeche),
+    parseNum(body.baujahr),
+    triggers,
+  );
+
+  let enrichedBrw = brw;
+  let enrichedMarktdaten = marktdaten;
+
+  // Synthetischen BRW aus Recherche erstellen wenn keiner vorhanden
+  if (!brw && research.recherchierter_brw && research.recherchierter_brw > 0) {
+    enrichedBrw = {
+      wert: research.recherchierter_brw,
+      stichtag: new Date().getFullYear() + '-01-01',
+      nutzungsart: 'unbekannt',
+      entwicklungszustand: 'B',
+      zone: '',
+      gemeinde: '',
+      bundesland,
+      quelle: 'KI-Recherche (Web-Suche)',
+      lizenz: '',
+      schaetzung: {
+        methode: 'KI-Recherche via Web-Suche',
+        basis_preis: research.recherchierter_brw,
+        faktor: 1.0,
+        datenstand: `${new Date().getFullYear()}-Q${Math.ceil((new Date().getMonth() + 1) / 3)}`,
+        hinweis: 'Bodenrichtwert aus KI-gestützter Web-Recherche. Keine offizielle Quelle.',
+      },
+    };
+    console.log(`KI-Recherche: Synthetischer BRW ${research.recherchierter_brw} €/m² erstellt`);
+  }
+
+  // Synthetische Marktdaten aus Recherche erstellen wenn keine vorhanden
+  if (!marktdaten && research.vergleichspreis_qm && research.vergleichspreis_qm > 0) {
+    const currentYear = new Date().getFullYear();
+    const currentQuarter = Math.ceil((new Date().getMonth() + 1) / 3);
+    enrichedMarktdaten = {
+      haus_kauf_preis: research.vergleichspreis_qm,
+      haus_kauf_min: Math.round(research.vergleichspreis_qm * 0.75),
+      haus_kauf_max: Math.round(research.vergleichspreis_qm * 1.30),
+      haus_miete_preis: research.mietpreis_qm,
+      haus_miete_min: research.mietpreis_qm ? Math.round(research.mietpreis_qm * 0.80) : null,
+      haus_miete_max: research.mietpreis_qm ? Math.round(research.mietpreis_qm * 1.25) : null,
+      wohnung_kauf_preis: null,
+      wohnung_kauf_min: null,
+      wohnung_kauf_max: null,
+      wohnung_miete_preis: null,
+      wohnung_miete_min: null,
+      wohnung_miete_max: null,
+      stadt: adresse,
+      stadtteil: '',
+      bundesland,
+      lat: 0,
+      lng: 0,
+      jahr: currentYear,
+      quartal: currentQuarter,
+    };
+    console.log(`KI-Recherche: Synthetische Marktdaten ${research.vergleichspreis_qm} €/m² erstellt`);
+  }
+
+  return { research, enrichedBrw, enrichedMarktdaten };
+}
+
+// ==========================================
 // POST /api/enrich — Hauptendpunkt für Zapier
 // ==========================================
 app.post('/api/enrich', async (c) => {
@@ -427,25 +522,34 @@ app.post('/api/enrich', async (c) => {
       const [marktdaten, preisindex, irw, bpi] = await Promise.all([
         marktdatenPromise, preisindexPromise, irwPromise, baupreisindexPromise,
       ]);
-      const rawBewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
-      const validation = await validateBewertung(bewertungInput, rawBewertung, null, adressString, geo.state);
+
+      // KI-Recherche: fehlende Daten durch Web-Suche anreichern
+      const { research, enrichedBrw, enrichedMarktdaten } = await maybeEnrichWithResearch(
+        null, marktdaten, geo.state, adressString, body,
+      );
+
+      const rawBewertung = buildBewertungFromContext(body, enrichedBrw, enrichedMarktdaten, preisindex, irw, bpi, geo.state);
+      const validation = await validateBewertung(bewertungInput, rawBewertung, enrichedBrw, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
       const elapsed = Date.now() - start;
       return c.json({
-        status: 'manual_required',
+        status: enrichedBrw ? 'success' : 'manual_required',
         input_echo: inputEcho,
-        bodenrichtwert: {
-          wert: null,
-          bundesland: geo.state,
-          confidence: 'none' as const,
-          grund: adapter.fallbackReason,
-          boris_url: adapter.borisUrl,
-          anleitung: 'Bitte Bodenrichtwert manuell einsehen und eingeben.',
-        },
-        marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
-        erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
+        bodenrichtwert: enrichedBrw
+          ? { ...enrichedBrw, confidence: 'research' as string }
+          : {
+              wert: null,
+              bundesland: geo.state,
+              confidence: 'none' as const,
+              grund: adapter.fallbackReason,
+              boris_url: adapter.borisUrl,
+              anleitung: 'Bitte Bodenrichtwert manuell einsehen und eingeben.',
+            },
+        marktdaten: enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null,
+        erstindikation: buildEnrichment(enrichedBrw?.wert ?? null, art, grundstuecksflaeche),
         bewertung,
         validation,
+        research: research || undefined,
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -461,22 +565,30 @@ app.post('/api/enrich', async (c) => {
     const elapsed = Date.now() - start;
 
     if (!brw) {
-      const rawBewertung = buildBewertungFromContext(body, null, marktdaten, preisindex, irw, bpi, geo.state);
-      const validation = await validateBewertung(bewertungInput, rawBewertung, null, adressString, geo.state);
+      // KI-Recherche: fehlende Daten durch Web-Suche anreichern
+      const { research, enrichedBrw, enrichedMarktdaten } = await maybeEnrichWithResearch(
+        null, marktdaten, geo.state, adressString, body,
+      );
+
+      const rawBewertung = buildBewertungFromContext(body, enrichedBrw, enrichedMarktdaten, preisindex, irw, bpi, geo.state);
+      const validation = await validateBewertung(bewertungInput, rawBewertung, enrichedBrw, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
       return c.json({
-        status: 'not_found',
+        status: enrichedBrw ? 'success' : 'not_found',
         input_echo: inputEcho,
-        bodenrichtwert: {
-          wert: null,
-          bundesland: geo.state,
-          confidence: 'none' as const,
-          grund: 'Kein Bodenrichtwert für diese Koordinaten gefunden.',
-        },
-        marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
-        erstindikation: buildEnrichment(null, art, grundstuecksflaeche),
+        bodenrichtwert: enrichedBrw
+          ? { ...enrichedBrw, confidence: 'research' as string }
+          : {
+              wert: null,
+              bundesland: geo.state,
+              confidence: 'none' as const,
+              grund: 'Kein Bodenrichtwert für diese Koordinaten gefunden.',
+            },
+        marktdaten: enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null,
+        erstindikation: buildEnrichment(enrichedBrw?.wert ?? null, art, grundstuecksflaeche),
         bewertung,
         validation,
+        research: research || undefined,
         meta: { cached: false, response_time_ms: elapsed },
       });
     }
@@ -486,8 +598,13 @@ app.post('/api/enrich', async (c) => {
       cache.set(cacheKey, brw);
     }
 
-    // 7. Bewertung + LLM-Validierung + Auto-Korrektur
-    const rawBewertung = buildBewertungFromContext(body, brw, marktdaten, preisindex, irw, bpi, geo.state);
+    // 7. KI-Recherche wenn IS24-Marktdaten fehlen (BRW haben wir schon)
+    const { research, enrichedMarktdaten: finalMarktdaten } = await maybeEnrichWithResearch(
+      brw, marktdaten, geo.state, adressString, body,
+    );
+
+    // 8. Bewertung + LLM-Validierung + Auto-Korrektur
+    const rawBewertung = buildBewertungFromContext(body, brw, finalMarktdaten, preisindex, irw, bpi, geo.state);
     const validation = await validateBewertung(bewertungInput, rawBewertung, brw, adressString, geo.state);
     const bewertung = applyLLMCorrection(rawBewertung, validation);
 
@@ -495,10 +612,11 @@ app.post('/api/enrich', async (c) => {
       status: 'success',
       input_echo: inputEcho,
       bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
-      marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
+      marktdaten: finalMarktdaten ? formatMarktdaten(finalMarktdaten) : null,
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
       bewertung,
       validation,
+      research: research || undefined,
       meta: { cached: false, response_time_ms: elapsed },
     });
 
@@ -519,7 +637,8 @@ app.delete('/api/cache', (c) => {
   const brwRemoved = cache.clear();
   const immoRemoved = immoCache.clear();
   const validationRemoved = clearValidationCache();
-  return c.json({ status: 'ok', removed: { brw: brwRemoved, immoscout: immoRemoved, validation: validationRemoved } });
+  const researchRemoved = clearResearchCache();
+  return c.json({ status: 'ok', removed: { brw: brwRemoved, immoscout: immoRemoved, validation: validationRemoved, research: researchRemoved } });
 });
 
 // ==========================================
@@ -533,11 +652,18 @@ app.get('/api/health', (c) => {
       brw: cache.stats(),
       immoscout: immoCache.stats(),
       validation: validationCacheStats(),
+      research: researchCacheStats(),
     },
     llm_validation: {
       enabled: !!process.env.ANTHROPIC_API_KEY,
       model: process.env.LLM_MODEL || 'claude-sonnet-4-5-20250929',
       timeout_ms: parseInt(process.env.LLM_TIMEOUT_MS || '8000', 10),
+    },
+    ai_research: {
+      enabled: !!process.env.ANTHROPIC_API_KEY,
+      model: process.env.RESEARCH_MODEL || 'claude-sonnet-4-5-20250929',
+      timeout_ms: parseInt(process.env.RESEARCH_TIMEOUT_MS || '20000', 10),
+      max_searches: 5,
     },
     timestamp: new Date().toISOString(),
   });
