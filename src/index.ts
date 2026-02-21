@@ -421,6 +421,118 @@ async function maybeEnrichWithResearch(
 }
 
 // ==========================================
+// Bericht-Objekt: Flache finale Variablen für PDFMonkey
+// ==========================================
+
+/**
+ * Erzeugt ein flaches Objekt mit exakt den Variablen-Namen,
+ * die PDFMonkey für den Onepager-Bericht erwartet.
+ *
+ * Wird NACH allen Korrekturschleifen (Plausibilität + LLM-Validierung)
+ * aus den finalen Werten gebaut → immer konsistent.
+ */
+function buildBericht(
+  bewertung: Bewertung,
+  inputEcho: {
+    adresse: string;
+    koordinaten: { lat: number; lon: number };
+    bundesland: string;
+    bewertungsparameter: {
+      art: string | null;
+      baujahr: number | null;
+      wohnflaeche: number | null;
+      grundstuecksflaeche: number | null;
+      objektunterart: string | null;
+      modernisierung: string | null;
+      energie: string | null;
+      ausstattung: string | null;
+    };
+  },
+  brwWert: number | null,
+  geo: { city: string; state: string; district?: string; county?: string },
+  marktdaten: ReturnType<typeof formatMarktdaten> | null,
+): Record<string, string | number | null> {
+  // ─── BKI_Ampelklasse: konfidenz → Farbcode für den Bericht ───
+  const ampelMap: Record<string, string> = {
+    hoch: 'gruen',
+    mittel: 'gelb',
+    gering: 'rot',
+  };
+
+  // ─── Modernisierung: lesbarer Text ───
+  const modScoreLabels: Record<string, string> = {
+    '5': 'Kernsanierung / Neuwertig',
+    '4': 'Umfassend modernisiert',
+    '3': 'Teilweise modernisiert',
+    '2': 'Nur einzelne Maßnahmen',
+    '1': 'Keine Modernisierungen',
+  };
+  const rawMod = inputEcho.bewertungsparameter.modernisierung;
+  const modernisierungLabel = rawMod
+    ? (modScoreLabels[rawMod.trim()] ?? rawMod)
+    : 'Nicht angegeben';
+
+  // ─── Energie: lesbarer Text ───
+  const energieScoreLabels: Record<string, string> = {
+    '5': 'Sehr gut',
+    '4': 'Gut',
+    '3': 'Durchschnittlich',
+    '2': 'Eher schlecht',
+    '1': 'Sehr schlecht',
+  };
+  const rawEnergie = inputEcho.bewertungsparameter.energie;
+  const energieLabel = rawEnergie
+    ? (energieScoreLabels[rawEnergie.trim()] ?? rawEnergie)
+    : 'Nicht angegeben';
+
+  // ─── Standortbeschreibung: Lage als Fließtext ───
+  const parts: string[] = [];
+  if (geo.district) parts.push(geo.district);
+  parts.push(geo.city);
+  if (geo.county && !geo.county.toLowerCase().includes(geo.city.toLowerCase())) {
+    parts.push(geo.county);
+  }
+  parts.push(geo.state);
+  let standort = parts.join(', ');
+
+  // Marktdaten-Kontext ergänzen
+  if (marktdaten) {
+    const quelle = marktdaten.stadtteil
+      ? `Stadtteil-Marktdaten (${marktdaten.stadtteil})`
+      : `Stadtdurchschnitt (${marktdaten.stadt})`;
+    standort += `. Marktdaten: ${quelle}, Stand ${marktdaten.datenstand}.`;
+  }
+
+  return {
+    // Preise pro m²
+    Preis_qm: bewertung.realistischer_qm_preis,
+    QMSpanne_Untergrenze: bewertung.qm_preis_spanne.min,
+    QMSpanne_Mittelwert: bewertung.realistischer_qm_preis,
+    QMSpanne_Obergrenze: bewertung.qm_preis_spanne.max,
+
+    // Gesamtpreise
+    Preis: bewertung.realistischer_immobilienwert,
+    Spanne_Untergrenze: bewertung.immobilienwert_spanne.min,
+    Spanne_Mittelwert: bewertung.realistischer_immobilienwert,
+    Spanne_Obergrenze: bewertung.immobilienwert_spanne.max,
+
+    // Objekteigenschaften
+    Modernisierung: modernisierungLabel,
+    Energie: energieLabel,
+    Objektunterart: inputEcho.bewertungsparameter.objektunterart || 'Nicht angegeben',
+
+    // Qualitäts-Ampel
+    BKI_Ampelklasse: ampelMap[bewertung.konfidenz] ?? 'gelb',
+
+    // Bodenrichtwert
+    Bodenrichtwert: brwWert ?? 0,
+
+    // Standort
+    Standortbeschreibung: standort,
+  };
+}
+
+// ==========================================
 // POST /api/enrich — Hauptendpunkt für Zapier
 // ==========================================
 app.post('/api/enrich', async (c) => {
@@ -502,15 +614,18 @@ app.post('/api/enrich', async (c) => {
       const rawBewertung = buildBewertungFromContext(body, cached, marktdaten, preisindex, irw, bpi, geo.state);
       const validation = await validateBewertung(bewertungInput, rawBewertung, cached, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
+      const fmtMarkt = marktdaten ? formatMarktdaten(marktdaten) : null;
+      const bericht = buildBericht(bewertung, inputEcho, cached.wert, geo, fmtMarkt);
       const elapsed = Date.now() - start;
       return c.json({
         status: 'success',
         input_echo: inputEcho,
         bodenrichtwert: { ...cached, confidence: (cached.schaetzung ? 'estimated' : 'high') as string },
-        marktdaten: marktdaten ? formatMarktdaten(marktdaten) : null,
+        marktdaten: fmtMarkt,
         erstindikation: buildEnrichment(cached.wert, art, grundstuecksflaeche),
         bewertung,
         validation,
+        bericht,
         meta: { cached: true, response_time_ms: elapsed },
       });
     }
@@ -531,6 +646,8 @@ app.post('/api/enrich', async (c) => {
       const rawBewertung = buildBewertungFromContext(body, enrichedBrw, enrichedMarktdaten, preisindex, irw, bpi, geo.state);
       const validation = await validateBewertung(bewertungInput, rawBewertung, enrichedBrw, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
+      const fmtMarkt = enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null;
+      const bericht = buildBericht(bewertung, inputEcho, enrichedBrw?.wert ?? null, geo, fmtMarkt);
       const elapsed = Date.now() - start;
       return c.json({
         status: enrichedBrw ? 'success' : 'manual_required',
@@ -545,10 +662,11 @@ app.post('/api/enrich', async (c) => {
               boris_url: adapter.borisUrl,
               anleitung: 'Bitte Bodenrichtwert manuell einsehen und eingeben.',
             },
-        marktdaten: enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null,
+        marktdaten: fmtMarkt,
         erstindikation: buildEnrichment(enrichedBrw?.wert ?? null, art, grundstuecksflaeche),
         bewertung,
         validation,
+        bericht,
         research: research || undefined,
         meta: { cached: false, response_time_ms: elapsed },
       });
@@ -573,6 +691,8 @@ app.post('/api/enrich', async (c) => {
       const rawBewertung = buildBewertungFromContext(body, enrichedBrw, enrichedMarktdaten, preisindex, irw, bpi, geo.state);
       const validation = await validateBewertung(bewertungInput, rawBewertung, enrichedBrw, adressString, geo.state);
       const bewertung = applyLLMCorrection(rawBewertung, validation);
+      const fmtMarkt = enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null;
+      const bericht = buildBericht(bewertung, inputEcho, enrichedBrw?.wert ?? null, geo, fmtMarkt);
       return c.json({
         status: enrichedBrw ? 'success' : 'not_found',
         input_echo: inputEcho,
@@ -584,10 +704,11 @@ app.post('/api/enrich', async (c) => {
               confidence: 'none' as const,
               grund: 'Kein Bodenrichtwert für diese Koordinaten gefunden.',
             },
-        marktdaten: enrichedMarktdaten ? formatMarktdaten(enrichedMarktdaten) : null,
+        marktdaten: fmtMarkt,
         erstindikation: buildEnrichment(enrichedBrw?.wert ?? null, art, grundstuecksflaeche),
         bewertung,
         validation,
+        bericht,
         research: research || undefined,
         meta: { cached: false, response_time_ms: elapsed },
       });
@@ -607,15 +728,18 @@ app.post('/api/enrich', async (c) => {
     const rawBewertung = buildBewertungFromContext(body, brw, finalMarktdaten, preisindex, irw, bpi, geo.state);
     const validation = await validateBewertung(bewertungInput, rawBewertung, brw, adressString, geo.state);
     const bewertung = applyLLMCorrection(rawBewertung, validation);
+    const fmtMarkt = finalMarktdaten ? formatMarktdaten(finalMarktdaten) : null;
+    const bericht = buildBericht(bewertung, inputEcho, brw.wert, geo, fmtMarkt);
 
     return c.json({
       status: 'success',
       input_echo: inputEcho,
       bodenrichtwert: { ...brw, confidence: (brw.schaetzung ? 'estimated' : 'high') as string },
-      marktdaten: finalMarktdaten ? formatMarktdaten(finalMarktdaten) : null,
+      marktdaten: fmtMarkt,
       erstindikation: buildEnrichment(brw.wert, art, grundstuecksflaeche),
       bewertung,
       validation,
+      bericht,
       research: research || undefined,
       meta: { cached: false, response_time_ms: elapsed },
     });
