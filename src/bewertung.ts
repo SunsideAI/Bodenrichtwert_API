@@ -1115,6 +1115,10 @@ export function buildBewertung(
     }
 
     // Signal 4: qm-Preis im Landesrahmen?
+    // WICHTIG: Der Cap darf den Wert NIE unter den Bodenwert drücken.
+    // Bei extrem hohen BRW (z.B. 8500 €/m² in Berlin-Mitte) übersteigt allein der
+    // Bodenwert/m² Wohnfläche jeden sinnvollen Wohnpreis-Cap. In solchen Fällen
+    // ist der Bodenwert der Mindestpreis — das Gebäude hat zusätzlichen Wert.
     if (!appliedSignals.has(4) && bundesland && realistischerImmobilienwert > 0 && wohnflaeche > 0) {
       const qmAktuell = realistischerImmobilienwert / wohnflaeche;
       const stateAvg = STATE_AVG_QM_PREIS[bundesland];
@@ -1122,20 +1126,34 @@ export function buildBewertung(
         const ref = istHaus ? stateAvg.haus : stateAvg.wohnung;
         const untergrenze = ref * 0.20; // Absolutes Minimum
         const obergrenze = ref * 3.00; // Absolutes Maximum (Spitzenlagen)
+
+        // Bodenwert-Floor: Gesamtwert darf nie unter Bodenwert + Mindest-Gebäudewert fallen
+        const minGebaeudewert = wohnflaeche * 500; // 500 €/m² als absolutes Minimum für ein Gebäude
+        const bodenwertFloor = bodenwert > 0 ? bodenwert + minGebaeudewert : 0;
+
         if (qmAktuell < untergrenze) {
-          realistischerImmobilienwert = Math.round(untergrenze * wohnflaeche);
+          const capWert = Math.round(untergrenze * wohnflaeche);
+          realistischerImmobilienwert = Math.max(capWert, bodenwertFloor);
           gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
           hinweise.push(
-            `Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) unter Minimum für ${bundesland}. Auf ${Math.round(untergrenze)} €/m² angehoben.`,
+            `Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) unter Minimum für ${bundesland}. Auf ${Math.round(realistischerImmobilienwert / wohnflaeche)} €/m² angehoben.`,
           );
           appliedSignals.add(4);
           needsCorrection = true;
         } else if (qmAktuell > obergrenze) {
-          realistischerImmobilienwert = Math.round(obergrenze * wohnflaeche);
+          const capWert = Math.round(obergrenze * wohnflaeche);
+          // Cap NICHT unter Bodenwert drücken
+          realistischerImmobilienwert = Math.max(capWert, bodenwertFloor);
           gebaeudewert = Math.max(0, realistischerImmobilienwert - bodenwert);
-          hinweise.push(
-            `Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) über Maximum für ${bundesland}. Auf ${Math.round(obergrenze)} €/m² reduziert.`,
-          );
+          if (realistischerImmobilienwert === bodenwertFloor) {
+            hinweise.push(
+              `Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) über Maximum für ${bundesland}, aber Bodenwert (${bodenwert.toLocaleString('de-DE')} €) bildet den Mindestpreis. Gebäudewert auf ${minGebaeudewert.toLocaleString('de-DE')} € geschätzt.`,
+            );
+          } else {
+            hinweise.push(
+              `Plausibilitätskorrektur: qm-Preis (${Math.round(qmAktuell)} €) über Maximum für ${bundesland}. Auf ${Math.round(obergrenze)} €/m² reduziert.`,
+            );
+          }
           appliedSignals.add(4);
           needsCorrection = true;
         }
@@ -1147,6 +1165,18 @@ export function buildBewertung(
     } else {
       break; // Keine weitere Korrektur nötig
     }
+  }
+
+  // ─── Finale Invariante: Gesamtwert ≥ Bodenwert + Mindest-Gebäudewert ────
+  // Ein bebautes Grundstück kann nie weniger wert sein als das unbebaute.
+  if (istHaus && bodenwert > 0 && realistischerImmobilienwert <= bodenwert) {
+    const minGebaeude = Math.round(wohnflaeche * 500); // 500 €/m² absolutes Minimum
+    realistischerImmobilienwert = bodenwert + minGebaeude;
+    gebaeudewert = minGebaeude;
+    korrekturAngewandt = true;
+    hinweise.push(
+      `Invariante-Korrektur: Gesamtwert (${realistischerImmobilienwert.toLocaleString('de-DE')} €) war unter Bodenwert (${bodenwert.toLocaleString('de-DE')} €). Mindest-Gebäudewert ${minGebaeude.toLocaleString('de-DE')} € addiert.`,
+    );
   }
 
   // Nach Korrekturen: qm-Preis und Spanne neu berechnen
