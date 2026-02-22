@@ -378,6 +378,13 @@ function buildBericht(bewertung, inputEcho, brw, geo, marktdaten, body) {
             return 'Nicht angegeben';
         return labels[raw.trim()] ?? raw;
     }
+    // Formatiert Zahlen mit deutschem Tausender-Trennzeichen (Punkt).
+    // null / undefined → leerer String statt "null"
+    function fmtNum(val) {
+        if (val == null)
+            return '';
+        return Math.round(val).toLocaleString('de-DE');
+    }
     // ─── Standortbeschreibung: Lage als Fließtext ───
     const locationParts = [];
     if (geo.district)
@@ -412,8 +419,8 @@ function buildBericht(bewertung, inputEcho, brw, geo, marktdaten, body) {
         Immobilienart: inputEcho.bewertungsparameter.art || 'Nicht angegeben',
         Objektunterart: inputEcho.bewertungsparameter.objektunterart || 'Nicht angegeben',
         Baujahr: inputEcho.bewertungsparameter.baujahr,
-        Wohnflaeche: inputEcho.bewertungsparameter.wohnflaeche,
-        Grundstuecksflaeche: inputEcho.bewertungsparameter.grundstuecksflaeche,
+        Wohnflaeche: fmtNum(inputEcho.bewertungsparameter.wohnflaeche),
+        Grundstuecksflaeche: fmtNum(inputEcho.bewertungsparameter.grundstuecksflaeche),
         Modernisierung: scoreToLabel(inputEcho.bewertungsparameter.modernisierung, modScoreLabels),
         Energie: scoreToLabel(inputEcho.bewertungsparameter.energie, energieScoreLabels),
         Ausstattung: scoreToLabel(inputEcho.bewertungsparameter.ausstattung, ausstattungScoreLabels),
@@ -422,21 +429,21 @@ function buildBericht(bewertung, inputEcho, brw, geo, marktdaten, body) {
             return s != null ? `${ZUSTAND_LABELS[s]} (${s})` : 'Nicht angegeben';
         })(),
         // ─── Preise pro m² ───
-        Preis_qm: bewertung.realistischer_qm_preis,
-        QMSpanne_Untergrenze: bewertung.qm_preis_spanne.min,
-        QMSpanne_Mittelwert: bewertung.realistischer_qm_preis,
-        QMSpanne_Obergrenze: bewertung.qm_preis_spanne.max,
+        Preis_qm: fmtNum(bewertung.realistischer_qm_preis),
+        QMSpanne_Untergrenze: fmtNum(bewertung.qm_preis_spanne.min),
+        QMSpanne_Mittelwert: fmtNum(bewertung.realistischer_qm_preis),
+        QMSpanne_Obergrenze: fmtNum(bewertung.qm_preis_spanne.max),
         // ─── Gesamtpreise ───
-        Preis: bewertung.realistischer_immobilienwert,
-        Spanne_Untergrenze: bewertung.immobilienwert_spanne.min,
-        Spanne_Mittelwert: bewertung.realistischer_immobilienwert,
-        Spanne_Obergrenze: bewertung.immobilienwert_spanne.max,
+        Preis: fmtNum(bewertung.realistischer_immobilienwert),
+        Spanne_Untergrenze: fmtNum(bewertung.immobilienwert_spanne.min),
+        Spanne_Mittelwert: fmtNum(bewertung.realistischer_immobilienwert),
+        Spanne_Obergrenze: fmtNum(bewertung.immobilienwert_spanne.max),
         // ─── Wertkomponenten ───
-        Bodenwert: bewertung.bodenwert,
-        Gebaeudewert: bewertung.gebaeudewert,
-        Ertragswert: bewertung.ertragswert,
+        Bodenwert: fmtNum(bewertung.bodenwert),
+        Gebaeudewert: fmtNum(bewertung.gebaeudewert),
+        Ertragswert: fmtNum(bewertung.ertragswert),
         // ─── Bodenrichtwert-Details ───
-        Bodenrichtwert: brw?.wert ?? 0,
+        Bodenrichtwert: fmtNum(brw?.wert ?? 0),
         Bodenrichtwert_Stichtag: brw?.stichtag || '',
         Bodenrichtwert_Zone: brw?.zone || '',
         Bodenrichtwert_Nutzungsart: brw?.nutzungsart || '',
